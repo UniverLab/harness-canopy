@@ -1308,12 +1308,13 @@ mod tests {
                 name: Some("marasmius".to_string()),
             }
         );
-        // ...and so does one addressed to its id.
+        // ...and so does one addressed to its id, which resolves the live
+        // session name consistently.
         assert_eq!(
             db.resolve_target_session_id("sess-orch").unwrap(),
             SessionTarget::Found {
                 id: "sess-orch".to_string(),
-                name: None,
+                name: Some("marasmius".to_string()),
             }
         );
         // The name that was never minted resolves to nothing.

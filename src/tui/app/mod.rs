@@ -25,6 +25,7 @@ mod refresh;
 mod refresh_cadence;
 mod refresh_graph_whimsg;
 pub(crate) mod session_hub;
+pub(crate) mod session_rename;
 mod sessions;
 mod sidebar_nav;
 mod slow_fingerprint;

@@ -215,7 +215,7 @@ impl GrantScope {
             Grant::All => true,
             Grant::Sessions(_) => hub
                 .get(id)
-                .is_some_and(|session| self.allows(&session.name)),
+                .is_some_and(|session| self.allows(&session.name())),
         }
     }
 

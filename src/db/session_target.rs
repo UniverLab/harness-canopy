@@ -21,23 +21,105 @@ pub enum SessionTarget {
     Ambiguous(Vec<String>),
 }
 
+/// Resolved live interactive session: stable UUID id and mutable display name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSessionTarget {
+    pub id: String,
+    pub name: String,
+}
+
+/// Structured target-resolution failure, so callers can emit deterministic text
+/// and preserve machine-readable details (e.g. matching ids).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolveTargetError {
+    Ambiguous {
+        name: String,
+        matches: Vec<(String, String)>,
+    },
+    Missing {
+        name: String,
+        live_names: Vec<String>,
+    },
+    Conflict {
+        id: String,
+        name: String,
+        by_id: Box<ResolvedSessionTarget>,
+        by_name: Box<ResolvedSessionTarget>,
+    },
+    Message(String),
+}
+
+impl ResolveTargetError {
+    pub fn message(&self) -> String {
+        match self {
+            ResolveTargetError::Ambiguous { name, matches } => {
+                let entries = matches
+                    .iter()
+                    .map(|(id, session_name)| format!("{session_name} ({id})"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("Session name '{name}' is ambiguous; matches: {entries}.")
+            }
+            ResolveTargetError::Missing { name, live_names } => {
+                let available = if live_names.is_empty() {
+                    "none".to_string()
+                } else {
+                    live_names.join(", ")
+                };
+                format!(
+                    "Session name '{name}' does not exist or is no longer live. Live interactive session names: {available}."
+                )
+            }
+            ResolveTargetError::Conflict {
+                id,
+                name,
+                by_id,
+                by_name,
+            } => format!(
+                "Target session id '{id}' and name '{name}' resolve to different sessions ('{} ({})' vs '{} ({})').",
+                by_id.name, by_id.id, by_name.name, by_name.id
+            ),
+            ResolveTargetError::Message(msg) => msg.clone(),
+        }
+    }
+
+    pub fn matching_ids(&self) -> Option<Vec<String>> {
+        match self {
+            ResolveTargetError::Ambiguous { matches, .. } => {
+                Some(matches.iter().map(|(id, _)| id.clone()).collect())
+            }
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ResolveTargetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
 impl Database {
     /// Resolve a configured session *name* to exactly one live hookable
     /// session. Ambiguity is reported, never collapsed to one match.
     pub fn resolve_target_session_name(&self, name: &str) -> Result<SessionTarget> {
         let candidates = self.list_hookable_sessions(i64::MAX)?;
-        let matching: Vec<String> = candidates
+        let mut matching: Vec<(String, String)> = candidates
             .into_iter()
             .filter(|session| session.name == name)
-            .map(|session| session.id)
+            .map(|session| (session.id, session.name))
             .collect();
+        matching.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(match matching.len() {
             0 => SessionTarget::Missing,
-            1 => SessionTarget::Found {
-                id: matching.into_iter().next().unwrap_or_default(),
-                name: Some(name.to_string()),
-            },
-            _ => SessionTarget::Ambiguous(matching),
+            1 => {
+                let (id, name) = matching.into_iter().next().unwrap_or_default();
+                SessionTarget::Found {
+                    id,
+                    name: Some(name),
+                }
+            }
+            _ => SessionTarget::Ambiguous(matching.into_iter().map(|(id, _)| id).collect()),
         })
     }
 
@@ -47,11 +129,109 @@ impl Database {
         Ok(match self.get_hookable_session(id)? {
             Some(session) => SessionTarget::Found {
                 id: session.id,
-                name: None,
+                name: Some(session.name),
             },
             None => SessionTarget::Missing,
         })
     }
+
+    /// Resolve a target by optional id and/or name with deterministic errors.
+    ///
+    /// - `id` only: hookable-session lookup by id, then fallback to name lookup.
+    /// - `name` only: name lookup.
+    /// - both: resolve both and refuse if they resolve to different session ids.
+    pub fn resolve_target_session(
+        &self,
+        id: Option<&str>,
+        name: Option<&str>,
+    ) -> Result<ResolvedSessionTarget, ResolveTargetError> {
+        let id = id.map(str::trim).filter(|s| !s.is_empty());
+        let name = name.map(str::trim).filter(|s| !s.is_empty());
+        match (id, name) {
+            (Some(id), Some(name)) => {
+                let by_id = self.resolve_target_session_single(Some(id), None)?;
+                let by_name = self.resolve_target_session_single(None, Some(name))?;
+                if by_id.id != by_name.id {
+                    return Err(ResolveTargetError::Conflict {
+                        id: id.to_string(),
+                        name: name.to_string(),
+                        by_id: Box::new(by_id),
+                        by_name: Box::new(by_name),
+                    });
+                }
+                Ok(by_id)
+            }
+            (Some(id), None) => self.resolve_target_session_single(Some(id), None),
+            (None, Some(name)) => self.resolve_target_session_single(None, Some(name)),
+            (None, None) => Err(ResolveTargetError::Message(
+                "Provide either `target_session_id` or `target_session_name`.".into(),
+            )),
+        }
+    }
+
+    fn resolve_target_session_single(
+        &self,
+        id: Option<&str>,
+        name: Option<&str>,
+    ) -> Result<ResolvedSessionTarget, ResolveTargetError> {
+        if let Some(name) = name {
+            return self.resolve_live_session_by_name(name);
+        }
+        let id = id.ok_or_else(|| {
+            ResolveTargetError::Message(
+                "Provide either `target_session_id` or `target_session_name`.".into(),
+            )
+        })?;
+        if let Some(session) = self.get_hookable_session(id).map_err(|e| db_err(&e))? {
+            return Ok(ResolvedSessionTarget {
+                id: session.id,
+                name: session.name,
+            });
+        }
+        self.resolve_live_session_by_name(id)
+    }
+
+    fn resolve_live_session_by_name(
+        &self,
+        name: &str,
+    ) -> Result<ResolvedSessionTarget, ResolveTargetError> {
+        let candidates = self
+            .list_hookable_sessions(i64::MAX)
+            .map_err(|e| db_err(&e))?;
+        let mut matching: Vec<(String, String)> = candidates
+            .iter()
+            .filter(|session| session.name == name)
+            .map(|session| (session.id.clone(), session.name.clone()))
+            .collect();
+        matching.sort_by(|a, b| a.0.cmp(&b.0));
+        match matching.len() {
+            0 => {
+                let mut live_names: Vec<String> =
+                    candidates.iter().map(|s| s.name.clone()).collect();
+                live_names.sort();
+                live_names.dedup();
+                Err(ResolveTargetError::Missing {
+                    name: name.to_string(),
+                    live_names,
+                })
+            }
+            1 => {
+                let (id, session_name) = matching.remove(0);
+                Ok(ResolvedSessionTarget {
+                    id,
+                    name: session_name,
+                })
+            }
+            _ => Err(ResolveTargetError::Ambiguous {
+                name: name.to_string(),
+                matches: matching,
+            }),
+        }
+    }
+}
+
+fn db_err(e: &anyhow::Error) -> ResolveTargetError {
+    ResolveTargetError::Message(e.to_string())
 }
 
 #[cfg(test)]
@@ -126,9 +306,78 @@ mod tests {
             db.resolve_target_session_id("s1").unwrap(),
             SessionTarget::Found {
                 id: "s1".to_string(),
-                name: None,
+                name: Some("orch".to_string()),
             }
         );
+    }
+
+    #[test]
+    fn resolve_target_session_by_name() {
+        let db = test_db();
+        add_session(&db, "s1", "orch", "interactive");
+        let resolved = db.resolve_target_session(None, Some("orch")).unwrap();
+        assert_eq!(resolved.id, "s1");
+        assert_eq!(resolved.name, "orch");
+    }
+
+    #[test]
+    fn resolve_target_session_id_falls_back_to_name() {
+        let db = test_db();
+        add_session(&db, "s1", "orch", "interactive");
+        let resolved = db.resolve_target_session(Some("orch"), None).unwrap();
+        assert_eq!(resolved.id, "s1");
+    }
+
+    #[test]
+    fn resolve_target_session_ambiguous_lists_sorted_matches() {
+        let db = test_db();
+        add_session(&db, "s2", "orch", "interactive");
+        add_session(&db, "s1", "orch", "interactive");
+        let err = db.resolve_target_session(None, Some("orch")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ambiguous"), "{msg}");
+        assert!(msg.contains("orch (s1), orch (s2)"), "{msg}");
+    }
+
+    #[test]
+    fn resolve_target_session_unknown_lists_sorted_live_names() {
+        let db = test_db();
+        add_session(&db, "s1", "zeta", "interactive");
+        add_session(&db, "s2", "alpha", "interactive");
+        let err = db
+            .resolve_target_session(None, Some("missing"))
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("does not exist or is no longer live"), "{msg}");
+        assert!(
+            msg.contains("Live interactive session names: alpha, zeta"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_target_session_unknown_with_no_live_sessions() {
+        let db = test_db();
+        let err = db
+            .resolve_target_session(None, Some("missing"))
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Live interactive session names: none"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_target_session_rejects_conflicting_id_and_name() {
+        let db = test_db();
+        add_session(&db, "s1", "alpha", "interactive");
+        add_session(&db, "s2", "beta", "interactive");
+        let err = db
+            .resolve_target_session(Some("s1"), Some("beta"))
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("resolve to different sessions"), "{msg}");
     }
 
     /// FR7: a hook addressed to the old name resolves to the resumed session.

@@ -31,10 +31,10 @@ use super::graphs::{
 };
 use super::protocol::{
     error_frame, exited_frame, file_frame, hello_frame, installed_harnesses, ok_frame, out_frame,
-    parse_client_frame, resized_frame, session_added_frame, session_removed_frame, sessions_frame,
-    shelf_added_frame, shelf_frame, shelf_removed_frame, size_released_frame, snapshot_frame,
-    spawned_frame, ClientFrame, SessionItem, ERR_BAD_REQUEST, ERR_DELIVERY_FAILED, ERR_FORBIDDEN,
-    ERR_INTERNAL, ERR_NOT_FOUND, ERR_SPAWN_FAILED,
+    parse_client_frame, resized_frame, session_added_frame, session_removed_frame,
+    session_renamed_frame, sessions_frame, shelf_added_frame, shelf_frame, shelf_removed_frame,
+    size_released_frame, snapshot_frame, spawned_frame, ClientFrame, SessionItem, ERR_BAD_REQUEST,
+    ERR_DELIVERY_FAILED, ERR_FORBIDDEN, ERR_INTERNAL, ERR_NOT_FOUND, ERR_SPAWN_FAILED,
 };
 use super::protocol_resume::{handle_resumable_list, handle_session_resume};
 use super::shelf::{ShelfStore, READ_CHUNK_BYTES};
@@ -685,6 +685,9 @@ fn handle_hub_event(out_tx: &OutTx, attached: &mut Attached, event: HubEvent) {
                 task.abort();
             }
             let _ = out_tx.send(session_removed_frame(&id));
+        }
+        HubEvent::SessionRenamed { id, name } => {
+            let _ = out_tx.send(session_renamed_frame(&id, &name));
         }
         HubEvent::Exited { id, code, to_all } => {
             if to_all || attached.contains_key(&id) {

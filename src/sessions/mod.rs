@@ -22,6 +22,7 @@ pub mod outbound;
 pub mod protocol;
 pub mod protocol_dir;
 pub mod protocol_resume;
+pub mod rename;
 pub mod resume;
 pub mod shelf;
 pub mod shelf_confine;

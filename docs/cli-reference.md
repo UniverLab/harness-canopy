@@ -415,6 +415,12 @@ A crew is a named, ordered member list ensembles and agent nodes/hooks bind
 to; member editing is MCP/TUI only (see
 [MCP tools](mcp-tools.md)).
 
+## Sessions
+
+| Command | Description |
+|---|---|
+| `canopy session rename <id-or-name> <new-name>` | Rename a live interactive session (via the running daemon, or the local database when the daemon is offline). `new-name` must be 1–32 chars of lowercase `a-z`, digits, or `-`, and not held by another live session; prints `<old_name> -> <new_name>` |
+
 ## Shelf
 
 | Command | Description |

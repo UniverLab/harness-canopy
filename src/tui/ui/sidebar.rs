@@ -5,7 +5,7 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::theme::Theme;
@@ -84,6 +84,54 @@ pub(super) fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App, theme: 
     if let Some(dialog) = app.project_relation_dialog.as_ref() {
         draw_project_relation_dialog(frame, content, app, dialog, theme);
     }
+
+    if let Some(rename) = app.session_rename_input.as_ref() {
+        draw_session_rename_dialog(frame, area, rename, theme);
+    }
+}
+
+/// Inline session-rename prompt opened with `r` on a live session card.
+fn draw_session_rename_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    rename: &crate::tui::app::session_rename::SessionRenameInput,
+    theme: &Theme,
+) {
+    let dialog_w = 44u16.min(area.width.saturating_sub(4));
+    let dialog_h = if rename.error.is_some() { 7 } else { 6 };
+    let dialog_h = dialog_h.min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(dialog_w)) / 2;
+    let y = area.y + (area.height.saturating_sub(dialog_h)) / 2;
+    let popup = Rect::new(x, y, dialog_w, dialog_h);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .title(" Rename session ")
+        .borders(dialog_borders_for(theme))
+        .border_style(Style::default().fg(theme.header_color));
+    frame.render_widget(block, popup);
+    let inner = Rect::new(
+        popup.x + 1,
+        popup.y + 1,
+        popup.width.saturating_sub(2),
+        popup.height.saturating_sub(2),
+    );
+    let mut lines = vec![
+        Line::from(vec![Span::styled(
+            format!("New name: {}_", rename.input),
+            Style::default().fg(STATUS_OK),
+        )]),
+        Line::from("a-z, 0-9, - · max 32 chars"),
+    ];
+    if let Some(error) = rename.error.as_deref() {
+        lines.push(Line::from(vec![Span::styled(
+            truncate_str(error, inner.width as usize),
+            Style::default()
+                .fg(STATUS_FAIL)
+                .add_modifier(Modifier::BOLD),
+        )]));
+    }
+    lines.push(Line::from("Enter submits · Esc cancels"));
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// The remote live-device header: `⇄ n` right-aligned in `header_color`

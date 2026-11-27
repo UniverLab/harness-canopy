@@ -179,7 +179,8 @@ fn reconcile_resumes_active_row_and_keeps_its_id_and_name() {
         .get("resume-me")
         .expect("an active row with no live PTY is resumed");
     assert_eq!(
-        resumed.name, "kept-name",
+        resumed.name(),
+        "kept-name",
         "the resumed session keeps its name"
     );
     assert_eq!(resumed.kind, SessionKind::Agent);
@@ -431,7 +432,7 @@ fn terminal_opens_clean_after_a_hub_restart() {
     reconcile_at_startup(&restarted, dir.path());
 
     let resumed = restarted.get("term-restarted").expect("terminal respawned");
-    assert_eq!(resumed.name, "hist-shell");
+    assert_eq!(resumed.name(), "hist-shell");
     let contents = resumed.test_contents().unwrap_or_default();
     assert!(
         !contents.contains("canopy-history-probe"),

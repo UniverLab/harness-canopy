@@ -309,9 +309,13 @@ async fn deliver_to_live_session_by_id() {
             .and_then(Value::as_str),
         Some("sess-by-id")
     );
-    assert!(
-        execution.output.get("target_session_name").is_none(),
-        "id-targeted sends name no session"
+    assert_eq!(
+        execution
+            .output
+            .get("target_session_name")
+            .and_then(Value::as_str),
+        Some("other"),
+        "id-targeted send resolves the live session name consistently"
     );
     let pending = db
         .list_pending_scheduled_prompts_for_session("sess-by-id")
@@ -348,7 +352,11 @@ fn deliver_missing_name_target_fails_without_enqueue() {
         .and_then(Value::as_str)
         .unwrap_or("");
     assert!(
-        error.contains("session does not exist or is no longer live"),
+        error.contains("does not exist or is no longer live"),
+        "{error}"
+    );
+    assert!(
+        error.contains("Live interactive session names: none"),
         "{error}"
     );
     assert_eq!(
@@ -391,10 +399,8 @@ fn deliver_ambiguous_name_fails_listing_ids() {
         .get("error")
         .and_then(Value::as_str)
         .unwrap_or("");
-    assert!(
-        error.contains("multiple live sessions share this name"),
-        "{error}"
-    );
+    assert!(error.contains("ambiguous"), "{error}");
+    assert!(error.contains("orch (sess-a), orch (sess-b)"), "{error}");
     let ids = execution
         .output
         .get("matching_ids")
@@ -438,7 +444,11 @@ fn deliver_dead_id_target_fails_without_enqueue() {
         .and_then(Value::as_str)
         .unwrap_or("");
     assert!(
-        error.contains("session does not exist or is no longer live"),
+        error.contains("does not exist or is no longer live"),
+        "{error}"
+    );
+    assert!(
+        error.contains("Live interactive session names: none"),
         "{error}"
     );
     assert!(

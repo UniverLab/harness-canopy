@@ -272,7 +272,7 @@ fn resume_recorded_session_keeps_the_row_id_and_leaves_it_active() {
     resume_recorded_session(&hub, &row, &config, None).expect("the resume starts a process");
 
     let resumed = hub.get("keep-me").expect("the session came back");
-    assert_eq!(resumed.name, "kept-name", "the row keeps its name");
+    assert_eq!(resumed.name(), "kept-name", "the row keeps its name");
     assert_eq!(
         db.get_interactive_session_status("keep-me")
             .unwrap()

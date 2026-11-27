@@ -134,6 +134,7 @@ macro_rules! app_new_fields {
             prompt_templates: PromptTemplates::load_from_registry()
                 .unwrap_or_else(|_| PromptTemplates::internal_templates()),
             simple_prompt_dialog: None,
+            session_rename_input: None,
             prompt_builder_sessions: HashMap::new(),
             prompt_tab_origin: None,
             prompt_raw_content_rect: None,

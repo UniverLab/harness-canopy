@@ -122,6 +122,9 @@ pub fn handle_preview_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
     if preview_graph_control_key(app, code, on_graph) {
         return Ok(());
     }
+    if app.open_session_rename_if_focused(code, modifiers) {
+        return Ok(());
+    }
     if preview_agent_misc_key(app, code, on_graph) {
         return Ok(());
     }
@@ -144,6 +147,10 @@ fn preview_modal_intercept(
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> Option<Result<()>> {
+    if app.session_rename_input.is_some() {
+        app.session_rename_key(code, modifiers);
+        return Some(Ok(()));
+    }
     if app.delete_project_confirm {
         return Some(preview_delete_project_confirm_key(app, code));
     }

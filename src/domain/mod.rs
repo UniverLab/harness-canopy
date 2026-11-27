@@ -46,6 +46,7 @@ pub mod sync;
 pub mod usage_stats;
 pub mod validation;
 pub mod validation_mutex;
+pub mod validation_session;
 
 #[cfg(test)]
 mod domain_tests;

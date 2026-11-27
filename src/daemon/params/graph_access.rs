@@ -96,12 +96,23 @@ pub struct SessionListParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SessionRenameParams {
+    /// Live session id or name to rename.
+    pub target: String,
+    /// New session name (1-32 chars, lowercase a-z, digits, '-').
+    pub new_name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ScheduledPromptCreateParams {
     /// The prompt text to deliver. Plain text only — delivered to the target
     /// session exactly as typed, the same as a promptbuilder send.
     pub prompt: String,
     /// Target interactive session id. Omit to schedule to your own session.
+    /// May also carry a live session name when no live session has that exact UUID.
     pub target_session_id: Option<String>,
+    /// Target interactive session name. Resolved to a single live interactive session.
+    pub target_session_name: Option<String>,
     /// ISO 8601 absolute time to fire at. Mutually exclusive with `in_seconds`.
     pub at: Option<String>,
     /// Relative delay in whole seconds. Mutually exclusive with `at`.

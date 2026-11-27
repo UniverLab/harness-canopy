@@ -207,6 +207,7 @@ impl App {
         match frame {
             HostFrame::SessionAdded { item } => self.attach_hub_item(&item),
             HostFrame::SessionRemoved { id } => self.remove_hub_session(&id),
+            HostFrame::SessionRenamed { id, name } => self.rename_hub_session(&id, &name),
             HostFrame::Exited { id, code } => self.note_hub_session_exited(&id, code),
             HostFrame::Resized { id, cols, rows } => self.note_remote_resized(&id, cols, rows),
             HostFrame::SizeReleased { id } => self.note_remote_size_released(&id),
@@ -479,6 +480,39 @@ impl App {
     fn hub_session_attached(&self, id: &str) -> bool {
         self.interactive_agents.iter().any(|a| a.id == id)
             || self.terminal_agents.iter().any(|a| a.id == id)
+    }
+
+    fn rename_hub_session(&mut self, id: &str, new_name: &str) {
+        let mut changed = false;
+        let mut old_terminal_name = None;
+        for agent in self
+            .interactive_agents
+            .iter_mut()
+            .chain(self.terminal_agents.iter_mut())
+        {
+            if agent.id != id {
+                continue;
+            }
+            if agent.is_terminal {
+                old_terminal_name = Some(agent.name.clone());
+            }
+            agent.name = new_name.to_string();
+            changed = true;
+            break;
+        }
+        if let Some(old_name) = old_terminal_name {
+            self.rename_terminal_history(&old_name, new_name);
+        }
+        if changed {
+            self.reindex_sessions();
+            self.slow_force = true;
+        }
+    }
+
+    fn rename_terminal_history(&mut self, old_name: &str, new_name: &str) {
+        if let Some(hist) = self.terminal_histories.remove(old_name) {
+            self.terminal_histories.insert(new_name.to_string(), hist);
+        }
     }
 
     /// Drop one hub session from the sidebar — unless it is a failed

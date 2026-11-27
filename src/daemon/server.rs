@@ -4,7 +4,6 @@ use std::sync::Arc;
 use rmcp::ServiceExt;
 
 use crate::application::notification_service::{DefaultNotificationService, NotificationService};
-use crate::application::ports::StateRepository;
 use crate::daemon::handler::HandlerDeps;
 use crate::daemon::health_routine::HealthRoutine;
 use crate::daemon::port_holder::serve_bind_error;
@@ -22,7 +21,10 @@ mod personal_rag;
 mod startup;
 
 use personal_rag::startup_personal_rag;
-use startup::{build_http_core, run_http_startup_reconciliations};
+use startup::{
+    announce_daemon_start, build_http_core, reconcile_stale_sessions_on_startup,
+    run_http_startup_reconciliations, write_startup_state,
+};
 
 #[cfg(test)]
 use personal_rag::{
@@ -105,6 +107,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
             ingestion: Arc::clone(&core.ingestion),
             dynamic_skills: Arc::clone(&core.dynamic_skills),
             shelf: sessions_state.shelf.clone(),
+            hub: Some(std::sync::Arc::new(sessions_state.hub.clone())),
             start_time: daemon_start,
             port,
         },
@@ -124,113 +127,6 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     .await;
 
     Ok(())
-}
-
-/// The startup banner line: version and port, logged once the port and data
-/// directory are resolved.
-fn announce_daemon_start(port: u16) {
-    tracing::info!(
-        "canopy v{} starting on port {}",
-        env!("CARGO_PKG_VERSION"),
-        port
-    );
-}
-
-/// The daemon's own record of being up: port, version and start time, in
-/// that order — every later `daemon status` / doctor probe reads these.
-fn write_startup_state(db: &Database, port: u16) -> Result<()> {
-    db.set_state("port", &port.to_string())?;
-    db.set_state("version", env!("CARGO_PKG_VERSION"))?;
-    db.set_state("last_start", &chrono::Utc::now().to_rfc3339())?;
-    Ok(())
-}
-
-/// Close interactive-session rows whose process is already gone. Called
-/// AFTER the resume above, on purpose: rows the resume relaunched carry a
-/// fresh live pid again, so whatever is still stale here belongs to a
-/// process that is really gone. Reconciling first would close the rows the
-/// resume needs and kill auto-resume.
-fn reconcile_stale_sessions_on_startup(db: &Database) {
-    match db.reconcile_stale_interactive_sessions() {
-        Ok(closed) if closed > 0 => {
-            tracing::info!("Closed {closed} stale interactive session(s) on startup");
-        }
-        Ok(_) => {}
-        Err(e) => tracing::warn!("Failed to reconcile stale interactive sessions: {e}"),
-    }
-}
-
-/// Startup reconciliation 1/2: graphs a previous daemon left `Running`.
-fn reconcile_orphaned_graphs_on_startup(db: &Database, data_dir: &std::path::Path, port: u16) {
-    match db.reconcile_orphaned_graphs(data_dir, port) {
-        Ok(reconciled) if !reconciled.is_empty() => {
-            tracing::warn!(
-                "Reconciled {} graph(s) left running by a previous daemon",
-                reconciled.len()
-            );
-            // CB84: best-effort end the harness sessions behind every
-            // reconciled run — the previous daemon's harness service may
-            // still be ticking. Detached so startup isn't blocked.
-            for (lp, run) in reconciled {
-                let platform = run.executed_platform.clone().unwrap_or_default();
-                let workdir = lp.workdir.clone();
-                if !platform.is_empty() {
-                    tokio::spawn(async move {
-                        crate::graph_engine::end_harness_session(&platform, &run, &workdir).await;
-                    });
-                }
-            }
-        }
-        Ok(_) => {}
-        Err(e) => tracing::error!("Failed to reconcile orphaned graphs: {}", e),
-    }
-}
-
-/// Startup reconciliation 2/2: queue members a previous daemon left
-/// `Running` after their graph was reconciled.
-fn reconcile_stranded_queue_specs_on_startup(db: &Database) {
-    match db.reconcile_stranded_queue_specs() {
-        Ok(count) if count > 0 => {
-            tracing::warn!(
-                "Reconciled {} stranded queue spec(s) left running by a previous daemon",
-                count
-            );
-        }
-        Ok(_) => {}
-        Err(e) => tracing::error!("Failed to reconcile stranded queue specs: {}", e),
-    }
-}
-
-/// Startup reconciliation 3/3: mutex leases a previous daemon left behind.
-/// Runs after the graph reconciliations above (which finalize the dangling
-/// runs whose leases this then frees).
-fn reconcile_mutex_leases_on_startup(db: &Database) {
-    match db.reconcile_mutex_leases() {
-        Ok((leases, waiters)) if leases > 0 || waiters > 0 => {
-            tracing::warn!(
-                "Reconciled {} stale mutex lease(s) and {} orphaned waiter(s) left by a previous daemon",
-                leases,
-                waiters
-            );
-        }
-        Ok(_) => {}
-        Err(e) => tracing::error!("Failed to reconcile mutex leases: {}", e),
-    }
-}
-
-/// The two awaited startup reads, in order: capture the dirty-tree state of
-/// interrupted specs, then reload the watcher set from the database.
-async fn capture_interrupted_state(graph_engine: &GraphEngine, watcher_engine: &WatcherEngine) {
-    if let Err(e) = graph_engine.capture_end_dirty_for_interrupted_specs().await {
-        tracing::error!(
-            "Failed to capture dirty-tree state for interrupted specs: {}",
-            e
-        );
-    }
-
-    if let Err(e) = watcher_engine.reload_from_db().await {
-        tracing::error!("Failed to reload watchers: {}", e);
-    }
 }
 
 /// The daemon's background tasks plus the tokens that stop them, started in
@@ -335,6 +231,7 @@ fn build_mcp_router(
         ingestion: handler_ingestion,
         dynamic_skills: handler_dynamic_skills,
         shelf: handler_shelf,
+        hub: handler_hub,
         start_time,
         port,
     } = deps;
@@ -352,6 +249,7 @@ fn build_mcp_router(
                 ingestion: Arc::clone(&handler_ingestion),
                 dynamic_skills: Arc::clone(&handler_dynamic_skills),
                 shelf: Arc::clone(&handler_shelf),
+                hub: handler_hub.clone(),
                 start_time,
                 port,
             }))
@@ -611,6 +509,7 @@ fn build_stdio_handler(
         ingestion: Arc::clone(&startup.ingestion),
         dynamic_skills: Arc::clone(&startup.dynamic_skills),
         shelf,
+        hub: None,
         start_time: startup.start_time,
         port: 0,
     }))
@@ -913,6 +812,7 @@ mod hang_repro {
                     ingestion: Arc::clone(&handler_ingestion),
                     dynamic_skills: Arc::clone(&handler_dynamic_skills),
                     shelf: crate::sessions::shelf::ShelfStore::for_test(&handler_db),
+                    hub: None,
                     start_time: std::time::Instant::now(),
                     port: 0,
                 }))
@@ -1064,6 +964,7 @@ mod hang_repro {
                     ingestion: Arc::clone(&handler_ingestion),
                     dynamic_skills: Arc::clone(&handler_dynamic_skills),
                     shelf: crate::sessions::shelf::ShelfStore::for_test(&handler_db),
+                    hub: None,
                     start_time: std::time::Instant::now(),
                     port: 0,
                 }))
@@ -1598,6 +1499,7 @@ mod mcp_error_logging_tests {
 #[cfg(test)]
 mod stdio_startup_reconciliation_tests {
     use super::*;
+    use crate::application::ports::StateRepository;
     use crate::domain::graphs::{
         Graph, GraphNode, GraphNodeKind, GraphNodeRun, GraphRunStatus, GraphSpec, GraphSpecStatus,
         GraphStatus,
@@ -1996,8 +1898,8 @@ mod stdio_startup_reconciliation_tests {
         use crate::application::ports::StateRepository;
         let dir = tempdir().unwrap();
         let db = test_db();
-        reconcile_orphaned_graphs_on_startup(&db, dir.path(), 0);
-        reconcile_stranded_queue_specs_on_startup(&db);
+        super::startup::reconcile_orphaned_graphs_on_startup(&db, dir.path(), 0);
+        super::startup::reconcile_stranded_queue_specs_on_startup(&db);
         let _ = db.get_state("port").unwrap();
     }
 
@@ -2015,7 +1917,7 @@ mod stdio_startup_reconciliation_tests {
             Arc::new(graph_engine),
         );
         let graph_engine2 = GraphEngine::new(Arc::clone(&db), Arc::clone(&notif));
-        capture_interrupted_state(&graph_engine2, &watcher).await;
+        super::startup::capture_interrupted_state(&graph_engine2, &watcher).await;
         let _ = dir.path().join("placeholder");
     }
 

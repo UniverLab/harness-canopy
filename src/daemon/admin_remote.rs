@@ -286,6 +286,7 @@ mod tests {
             ingestion,
             dynamic_skills,
             shelf: crate::sessions::shelf::ShelfStore::for_test(db),
+            hub: None,
             start_time: std::time::Instant::now(),
             port: 0,
         }

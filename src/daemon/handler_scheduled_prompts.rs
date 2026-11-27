@@ -52,16 +52,31 @@ impl TaskTriggerHandler {
             ));
         };
 
-        let target_session_id = match params
+        let target_id = params
             .target_session_id
             .as_deref()
             .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            Some(id) => id.to_string(),
-            None => agent_id.clone(),
+            .filter(|s| !s.is_empty());
+        let target_name = params
+            .target_session_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let resolved_target = if target_id.is_none() && target_name.is_none() {
+            match self
+                .db
+                .resolve_target_session(Some(agent_id.as_str()), None)
+            {
+                Ok(resolved) => resolved,
+                Err(err) => return Ok(error_result(&err.to_string())),
+            }
+        } else {
+            match self.db.resolve_target_session(target_id, target_name) {
+                Ok(resolved) => resolved,
+                Err(err) => return Ok(error_result(&err.to_string())),
+            }
         };
-
+        let target_session_id = resolved_target.id;
         let Some(target_session) = self
             .db
             .get_hookable_session(&target_session_id)
@@ -196,6 +211,86 @@ pub(crate) fn pending_send_origin(provenance: Option<&ScheduledPromptProvenance>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::notification_service::DefaultNotificationService;
+    use crate::application::notification_service::NotificationService;
+    use crate::daemon::handler::HandlerDeps;
+    use crate::daemon::handler::TaskTriggerHandler;
+    use crate::db::Database;
+    use crate::executor::Executor;
+    use crate::graph_engine::GraphEngine;
+    use crate::rag::ingestion::IngestionManager;
+    use crate::watchers::WatcherEngine;
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    fn make_handler() -> (tempfile::TempDir, Arc<Database>, TaskTriggerHandler) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
+        let notif: Arc<dyn NotificationService> = Arc::new(DefaultNotificationService);
+        let executor = Arc::new(Executor::new(Arc::clone(&db), Arc::clone(&notif)));
+        let graph_engine = Arc::new(GraphEngine::new(Arc::clone(&db), Arc::clone(&notif)));
+        let watcher_engine = Arc::new(WatcherEngine::new(
+            Arc::clone(&db),
+            Arc::clone(&executor),
+            Arc::clone(&graph_engine),
+        ));
+        let ingestion = Arc::new(IngestionManager::new(
+            Arc::clone(&db),
+            dir.path().to_path_buf(),
+        ));
+        let dynamic_skills = Arc::new(crate::dynamic_skills::SkillStore::new(
+            dir.path().join("skills"),
+            Vec::new(),
+            15,
+        ));
+        let handler = TaskTriggerHandler::with_deps(HandlerDeps {
+            db: Arc::clone(&db),
+            executor,
+            watcher_engine,
+            scheduler_notify: Arc::new(Notify::new()),
+            scheduled_prompt_notify: Arc::new(Notify::new()),
+            graph_engine,
+            notification_service: notif,
+            ingestion,
+            dynamic_skills,
+            shelf: crate::sessions::shelf::ShelfStore::for_test(&db),
+            hub: None,
+            start_time: std::time::Instant::now(),
+            port: 0,
+        });
+        (dir, db, handler)
+    }
+
+    fn add_session(db: &Database, id: &str, name: &str) {
+        db.insert_interactive_session(
+            id,
+            name,
+            "opencode",
+            "/tmp",
+            None,
+            None,
+            "interactive",
+            None,
+        )
+        .unwrap();
+    }
+
+    fn text(result: &CallToolResult) -> String {
+        result
+            .content
+            .iter()
+            .filter_map(|b| b.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn agent_parts(id: &str) -> axum::http::request::Parts {
+        let req = axum::http::Request::builder()
+            .header(crate::shared::sync_identity::CANOPY_AGENT_ID_HEADER, id)
+            .body(())
+            .unwrap();
+        req.into_parts().0
+    }
 
     #[test]
     fn pending_origin_names_agent_hook_and_deliver() {
@@ -226,5 +321,130 @@ mod tests {
             pending_send_origin(Some(&ScheduledPromptProvenance::spec_review())),
             ""
         );
+    }
+
+    #[tokio::test]
+    async fn scheduled_prompt_create_resolves_target_session_name() {
+        let (_dir, db, handler) = make_handler();
+        add_session(&db, "s1", "laricifomes");
+        let parts = agent_parts("caller-1");
+        let result = handler
+            .scheduled_prompt_create_impl(
+                ScheduledPromptCreateParams {
+                    prompt: "hello".into(),
+                    target_session_id: None,
+                    target_session_name: Some("laricifomes".into()),
+                    at: None,
+                    in_seconds: Some(60),
+                },
+                Some(&parts),
+            )
+            .await
+            .unwrap();
+        let out = text(&result);
+        assert!(!result.is_error.unwrap_or(false), "{out}");
+        let pending = db.list_pending_scheduled_prompts_for_session("s1").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].target_session_id, "s1");
+    }
+
+    #[tokio::test]
+    async fn scheduled_prompt_create_accepts_name_in_target_session_id() {
+        let (_dir, db, handler) = make_handler();
+        add_session(&db, "s1", "toona");
+        let parts = agent_parts("caller-1");
+        let result = handler
+            .scheduled_prompt_create_impl(
+                ScheduledPromptCreateParams {
+                    prompt: "hello".into(),
+                    target_session_id: Some("toona".into()),
+                    target_session_name: None,
+                    at: None,
+                    in_seconds: Some(60),
+                },
+                Some(&parts),
+            )
+            .await
+            .unwrap();
+        let out = text(&result);
+        assert!(!result.is_error.unwrap_or(false), "{out}");
+        let pending = db.list_pending_scheduled_prompts_for_session("s1").unwrap();
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn scheduled_prompt_create_ambiguous_name_error_lists_sorted_matches() {
+        let (_dir, db, handler) = make_handler();
+        add_session(&db, "s2", "orch");
+        add_session(&db, "s1", "orch");
+        let parts = agent_parts("caller-1");
+        let result = handler
+            .scheduled_prompt_create_impl(
+                ScheduledPromptCreateParams {
+                    prompt: "hello".into(),
+                    target_session_id: None,
+                    target_session_name: Some("orch".into()),
+                    at: None,
+                    in_seconds: Some(60),
+                },
+                Some(&parts),
+            )
+            .await
+            .unwrap();
+        let out = text(&result);
+        assert!(result.is_error.unwrap_or(false), "{out}");
+        assert!(out.contains("ambiguous"), "{out}");
+        assert!(out.contains("orch (s1), orch (s2)"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn scheduled_prompt_create_unknown_name_error_lists_sorted_live_names() {
+        let (_dir, db, handler) = make_handler();
+        add_session(&db, "s1", "zeta");
+        add_session(&db, "s2", "alpha");
+        let parts = agent_parts("caller-1");
+        let result = handler
+            .scheduled_prompt_create_impl(
+                ScheduledPromptCreateParams {
+                    prompt: "hello".into(),
+                    target_session_id: None,
+                    target_session_name: Some("missing".into()),
+                    at: None,
+                    in_seconds: Some(60),
+                },
+                Some(&parts),
+            )
+            .await
+            .unwrap();
+        let out = text(&result);
+        assert!(result.is_error.unwrap_or(false), "{out}");
+        assert!(out.contains("does not exist or is no longer live"), "{out}");
+        assert!(
+            out.contains("Live interactive session names: alpha, zeta"),
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_rename_tool_renames_live_session() {
+        let (_dir, db, handler) = make_handler();
+        add_session(&db, "s1", "alpha");
+        let result = handler
+            .session_rename(crate::daemon::params_extract::Parameters(
+                SessionRenameParams {
+                    target: "alpha".into(),
+                    new_name: "beta".into(),
+                },
+            ))
+            .await
+            .unwrap();
+        let out = text(&result);
+        assert!(!result.is_error.unwrap_or(false), "{out}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["id"], "s1");
+        assert_eq!(v["old_name"], "alpha");
+        assert_eq!(v["new_name"], "beta");
+        let session = db.get_hookable_session("s1").unwrap().unwrap();
+        assert_eq!(session.name, "beta");
     }
 }

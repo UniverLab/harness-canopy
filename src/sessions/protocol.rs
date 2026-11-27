@@ -30,10 +30,11 @@ pub(crate) use protocol_frames::harnesses_in;
 pub use protocol_frames::{
     attach_frame, detach_frame, error_frame, exited_frame, file_frame, hello_frame, input_frame,
     installed_harnesses, kill_frame, list_frame, ok_frame, out_frame, prompt_frame, resize_frame,
-    resized_frame, session_added_frame, session_removed_frame, sessions_frame, shelf_added_frame,
-    shelf_delete_frame, shelf_frame, shelf_get_frame, shelf_list_frame, shelf_missing_frame,
-    shelf_removed_frame, size_released_frame, snapshot_frame, snapshot_more_frame, spawn_frame,
-    spawn_frame_full, spawned_frame, SpawnFrameArgs,
+    resized_frame, session_added_frame, session_removed_frame, session_renamed_frame,
+    sessions_frame, shelf_added_frame, shelf_delete_frame, shelf_frame, shelf_get_frame,
+    shelf_list_frame, shelf_missing_frame, shelf_removed_frame, size_released_frame,
+    snapshot_frame, snapshot_more_frame, spawn_frame, spawn_frame_full, spawned_frame,
+    SpawnFrameArgs,
 };
 #[cfg(test)]
 pub use protocol_frames::{resumable_list_frame, session_resume_frame, OWNER_FEATURES};

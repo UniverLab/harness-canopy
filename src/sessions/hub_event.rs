@@ -19,6 +19,11 @@ pub enum HubEvent {
         code: i32,
         to_all: bool,
     },
+    /// The session's display name changed.
+    SessionRenamed {
+        id: String,
+        name: String,
+    },
     /// The session's PTY size changed; forwarded to attached connections.
     Resized {
         id: String,

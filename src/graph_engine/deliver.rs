@@ -9,7 +9,6 @@
 //! fires) lands it within seconds; a session that disappears later is
 //! preserved by the existing dead-target path.
 use super::*;
-use crate::db::session_target::SessionTarget;
 
 impl GraphEngine {
     /// Run one `deliver` node: resolve its single target, render its prompt
@@ -45,11 +44,9 @@ impl GraphEngine {
         Ok(self.enqueue_deliver_send(lp, node, input.run_id, &enqueue))
     }
 
-    /// Resolve the node's single target: exactly one of
-    /// `target_session_name`/`target_session_id` (blank counts as unset —
-    /// write-time validation enforces the rule, this re-checks the values
-    /// actually stored). A name resolves to exactly one live hookable
-    /// session; ambiguity is reported, never collapsed to one match.
+    /// Resolve the node's single target. Name/id resolve with the same rules
+    /// as scheduled_prompts and interactive hooks: id falls back to name, and a
+    /// name must identify exactly one live interactive session.
     fn resolve_deliver_target(
         &self,
         node: &GraphNode,
@@ -66,56 +63,41 @@ impl GraphEngine {
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|s| !s.is_empty());
-        if let Some(id) = target_id {
-            return Ok((id.to_string(), None));
+        if target_id.is_none() && target_name.is_none() {
+            return Err(deliver_failure(
+                serde_json::json!({
+                    "error": "deliver node has no target session id or name",
+                }),
+                format!(
+                    "Deliver node '{}' has no target session id or name; message not enqueued.",
+                    node.name
+                ),
+            ));
         }
-        if let Some(name) = target_name {
-            return match self.db.resolve_target_session_name(name) {
-                Err(error) => Err(deliver_failure(
-                    serde_json::json!({
-                        "target_session_name": name,
-                        "error": error.to_string(),
-                    }),
+        match self.db.resolve_target_session(target_id, target_name) {
+            Ok(resolved) => Ok((resolved.id, Some(resolved.name))),
+            Err(err) => {
+                let mut output = serde_json::json!({
+                    "error": err.to_string(),
+                });
+                if let Some(name) = target_name {
+                    output["target_session_name"] = Value::String(name.to_string());
+                }
+                if let Some(id) = target_id {
+                    output["target_session_id"] = Value::String(id.to_string());
+                }
+                if let Some(ids) = err.matching_ids() {
+                    output["matching_ids"] = serde_json::json!(ids);
+                }
+                Err(deliver_failure(
+                    output,
                     format!(
-                        "Deliver node '{}' could not resolve target session name '{name}': {error}; message not enqueued.",
-                        node.name
+                        "Deliver node '{}' could not resolve target: {}; message not enqueued.",
+                        node.name, err
                     ),
-                )),
-                Ok(SessionTarget::Missing) => Err(deliver_failure(
-                    serde_json::json!({
-                        "target_session_name": name,
-                        "error": "session does not exist or is no longer live",
-                    }),
-                    format!(
-                        "Deliver node '{}' target session name '{name}' does not exist or is no longer live; message not enqueued.",
-                        node.name
-                    ),
-                )),
-                Ok(SessionTarget::Found { id, name }) => Ok((id, name)),
-                Ok(SessionTarget::Ambiguous(many)) => Err(deliver_failure(
-                    serde_json::json!({
-                        "target_session_name": name,
-                        "error": "multiple live sessions share this name",
-                        "matching_ids": many,
-                    }),
-                    format!(
-                        "Deliver node '{}' target session name '{name}' matches {} live sessions ({}); message not enqueued.",
-                        node.name,
-                        many.len(),
-                        many.join(", ")
-                    ),
-                )),
-            };
+                ))
+            }
         }
-        Err(deliver_failure(
-            serde_json::json!({
-                "error": "deliver node has no target session id or name",
-            }),
-            format!(
-                "Deliver node '{}' has no target session id or name; message not enqueued.",
-                node.name
-            ),
-        ))
     }
 
     /// Render the node's prompt template exactly like

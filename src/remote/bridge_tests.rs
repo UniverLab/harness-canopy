@@ -552,7 +552,7 @@ async fn guest_resize_release_is_refused() {
     let session = spawn_cat(&state.hub, "/tmp");
     let frame = release_frame(&session.id);
 
-    let narrow = Grant::Sessions(std::collections::HashSet::from([session.name.clone()]));
+    let narrow = Grant::Sessions(std::collections::HashSet::from([session.name()]));
     let (out_tx, mut out_rx) = outbound::channel();
     let mut guest = RemoteBridge::with_grant(Arc::clone(&state), narrow, true);
     guest.handle_text(&frame, &out_tx).await;

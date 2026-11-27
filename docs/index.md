@@ -54,7 +54,7 @@ no external services, no cloud account.
 - [Graph catalogue](https://graphs.univerlab.org) — ready-made graphs to install.
 - [RAG Pipeline](rag.md) — personal document search.
 - [Network and Privacy](network-and-privacy.md) — every outbound connection, and how to turn each off.
-- [MCP Tools](mcp-tools.md) — all 34 tools by category.
+- [MCP Tools](mcp-tools.md) — all 35 tools by category.
 - [CLI Reference](cli-reference.md) — every `canopy` command.
 
 ## Part of UniverLab

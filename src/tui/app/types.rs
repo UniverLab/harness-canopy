@@ -428,6 +428,8 @@ pub struct App {
     pub(crate) prompt_templates: crate::tui::prompt_templates::PromptTemplates,
     /// Current simple prompt dialog state
     pub(crate) simple_prompt_dialog: Option<SimplePromptDialog>,
+    /// Inline rename prompt for the focused live session (`r` on its card).
+    pub(crate) session_rename_input: Option<super::session_rename::SessionRenameInput>,
     /// Persisted prompt-builder sessions per agent/session (cleared on send).
     pub(crate) prompt_builder_sessions:
         HashMap<String, crate::tui::app::dialog::PromptBuilderSession>,

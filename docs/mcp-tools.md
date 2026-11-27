@@ -140,7 +140,7 @@ See [Graphs](graphs.md).
 
 Kept callable for the whole 3.x line, but excluded from tool listings
 (`tools/list`) so nothing new adopts them — call the 3.x name instead. Not
-counted in the 34 tools above.
+counted in the 35 tools above.
 
 | Deprecated name | Renamed to (3.0.0) |
 |---|---|
@@ -244,17 +244,18 @@ ensembles — a crew.
 |---|---|
 | `get_tools` | Scope-sensitive action protocols with recommended tool sets; the `session_start` scope also returns the caller's own session id |
 
-## Interactive sessions (1)
+## Interactive sessions (2)
 
 | Tool | Description |
 |---|---|
 | `session_list` | List live interactive sessions with the exact ids an interactive graph hook's `target_session_id` accepts, each with platform, workdir, name, and `attached` — whether the session's CLI process is still alive on this host, which stays `yes` for a daemon-hosted session even while no TUI is open; pass `session_id` to look one up. A resumed session appears once, with the id and name it already had — never a dead row plus a freshly-named one; only a name held by another live session mints a fresh name, keeping the id |
+| `session_rename` | Rename a live interactive session. `target` accepts a live session id or name; `new_name` must be 1-32 chars of lowercase `a-z`, digits, or `-`, and must not be held by another live session. Returns `id`, `old_name`, and `new_name`. |
 
 ## Scheduled prompts (1)
 
 | Tool | Description |
 |---|---|
-| `scheduled_prompts` | Schedule a prompt for future delivery to a session (own session by default), and list and cancel pending scheduled sends. Actions: `create` (`prompt`, exactly one of `at`/`in_seconds`, optional `target_session_id`), `list` (a session's pending sends, soonest first; optional `session_id`), `cancel` (`id`) — pass `action` plus the params the refusal/table lists |
+| `scheduled_prompts` | Schedule a prompt for future delivery to a session (own session by default), and list and cancel pending scheduled sends. Actions: `create` (`prompt`, exactly one of `at`/`in_seconds`, optional `target_session_id` or `target_session_name`; `target_session_id` may also carry a live session name when no live session has that UUID; if both are given they must resolve to the same session), `list` (a session's pending sends, soonest first; optional `session_id`), `cancel` (`id`) — pass `action` plus the params the refusal/table lists. Name resolution is deterministic: an ambiguous name is refused listing `name (id)` matches sorted by id, an unknown name is refused listing live interactive session names sorted alphabetically (or `none`). |
 
 ## Session shelf (3)
 

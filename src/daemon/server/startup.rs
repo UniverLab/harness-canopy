@@ -2,6 +2,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use crate::application::notification_service::{DefaultNotificationService, NotificationService};
+use crate::application::ports::StateRepository;
 use crate::db::Database;
 use crate::executor::Executor;
 use crate::graph_engine::GraphEngine;
@@ -99,10 +100,10 @@ pub(super) async fn run_http_startup_reconciliations(
     core: &HttpCore,
     port: u16,
 ) {
-    super::reconcile_orphaned_graphs_on_startup(db, data_dir, port);
+    reconcile_orphaned_graphs_on_startup(db, data_dir, port);
     refresh_canopy_skill_files(data_dir);
-    super::reconcile_stranded_queue_specs_on_startup(db);
-    super::reconcile_mutex_leases_on_startup(db);
+    reconcile_stranded_queue_specs_on_startup(db);
+    reconcile_mutex_leases_on_startup(db);
     migrate_agents_to_backing_graphs(db);
     if let Err(e) = db.requeue_in_review_specs() {
         tracing::warn!("Failed to requeue in_review specs: {e}");
@@ -116,7 +117,7 @@ pub(super) async fn run_http_startup_reconciliations(
     if let Err(e) = db.delete_graph_run_output_for_non_running() {
         tracing::error!("Failed to clean stale graph_run_output chunks: {}", e);
     }
-    super::capture_interrupted_state(&core.graph_engine, &core.watcher_engine).await;
+    capture_interrupted_state(&core.graph_engine, &core.watcher_engine).await;
 
     startup_personal_rag(Arc::clone(&core.ingestion), data_dir).await;
     // CB91: one maintenance pass at startup, after the reconciliations that
@@ -145,5 +146,119 @@ fn migrate_agents_to_backing_graphs(db: &Arc<Database>) {
         }
         Ok(_) => {}
         Err(e) => tracing::error!("Agent-to-graph migration failed: {e:#}"),
+    }
+}
+
+/// The startup banner line: version and port, logged once the port and data
+/// directory are resolved.
+pub(super) fn announce_daemon_start(port: u16) {
+    tracing::info!(
+        "canopy v{} starting on port {}",
+        env!("CARGO_PKG_VERSION"),
+        port
+    );
+}
+
+/// The daemon's own record of being up: port, version and start time, in
+/// that order — every later `daemon status` / doctor probe reads these.
+pub(super) fn write_startup_state(db: &Database, port: u16) -> anyhow::Result<()> {
+    db.set_state("port", &port.to_string())?;
+    db.set_state("version", env!("CARGO_PKG_VERSION"))?;
+    db.set_state("last_start", &chrono::Utc::now().to_rfc3339())?;
+    Ok(())
+}
+
+/// Close interactive-session rows whose process is already gone. Called
+/// AFTER the resume above, on purpose: rows the resume relaunched carry a
+/// fresh live pid again, so whatever is still stale here belongs to a
+/// process that is really gone. Reconciling first would close the rows the
+/// resume needs and kill auto-resume.
+pub(super) fn reconcile_stale_sessions_on_startup(db: &Database) {
+    match db.reconcile_stale_interactive_sessions() {
+        Ok(closed) if closed > 0 => {
+            tracing::info!("Closed {closed} stale interactive session(s) on startup");
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("Failed to reconcile stale interactive sessions: {e}"),
+    }
+}
+
+/// Startup reconciliation 1/2: graphs a previous daemon left `Running`.
+pub(super) fn reconcile_orphaned_graphs_on_startup(
+    db: &Database,
+    data_dir: &std::path::Path,
+    port: u16,
+) {
+    match db.reconcile_orphaned_graphs(data_dir, port) {
+        Ok(reconciled) if !reconciled.is_empty() => {
+            tracing::warn!(
+                "Reconciled {} graph(s) left running by a previous daemon",
+                reconciled.len()
+            );
+            // CB84: best-effort end the harness sessions behind every
+            // reconciled run — the previous daemon's harness service may
+            // still be ticking. Detached so startup isn't blocked.
+            for (lp, run) in reconciled {
+                let platform = run.executed_platform.clone().unwrap_or_default();
+                let workdir = lp.workdir.clone();
+                if !platform.is_empty() {
+                    tokio::spawn(async move {
+                        crate::graph_engine::end_harness_session(&platform, &run, &workdir).await;
+                    });
+                }
+            }
+        }
+        Ok(_) => {}
+        Err(e) => tracing::error!("Failed to reconcile orphaned graphs: {}", e),
+    }
+}
+
+/// Startup reconciliation 2/2: queue members a previous daemon left
+/// `Running` after their graph was reconciled.
+pub(super) fn reconcile_stranded_queue_specs_on_startup(db: &Database) {
+    match db.reconcile_stranded_queue_specs() {
+        Ok(count) if count > 0 => {
+            tracing::warn!(
+                "Reconciled {} stranded queue spec(s) left running by a previous daemon",
+                count
+            );
+        }
+        Ok(_) => {}
+        Err(e) => tracing::error!("Failed to reconcile stranded queue specs: {}", e),
+    }
+}
+
+/// Startup reconciliation 3/3: mutex leases a previous daemon left behind.
+/// Runs after the graph reconciliations above (which finalize the dangling
+/// runs whose leases this then frees).
+pub(super) fn reconcile_mutex_leases_on_startup(db: &Database) {
+    match db.reconcile_mutex_leases() {
+        Ok((leases, waiters)) if leases > 0 || waiters > 0 => {
+            tracing::warn!(
+                "Reconciled {} stale mutex lease(s) and {} orphaned waiter(s) left by a previous daemon",
+                leases,
+                waiters
+            );
+        }
+        Ok(_) => {}
+        Err(e) => tracing::error!("Failed to reconcile mutex leases: {}", e),
+    }
+}
+
+/// The two awaited startup reads, in order: capture the dirty-tree state of
+/// interrupted specs, then reload the watcher set from the database.
+pub(super) async fn capture_interrupted_state(
+    graph_engine: &GraphEngine,
+    watcher_engine: &WatcherEngine,
+) {
+    if let Err(e) = graph_engine.capture_end_dirty_for_interrupted_specs().await {
+        tracing::error!(
+            "Failed to capture dirty-tree state for interrupted specs: {}",
+            e
+        );
+    }
+
+    if let Err(e) = watcher_engine.reload_from_db().await {
+        tracing::error!("Failed to reload watchers: {}", e);
     }
 }

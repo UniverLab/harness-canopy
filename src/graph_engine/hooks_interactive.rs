@@ -1,5 +1,4 @@
 use super::*;
-use crate::db::session_target::SessionTarget;
 
 pub(crate) struct InteractiveSend<'a> {
     pub(crate) target: &'a str,
@@ -60,52 +59,6 @@ impl GraphEngine {
         self.enqueue_interactive_send(&send)
     }
 
-    pub(crate) fn resolve_target_by_name(
-        &self,
-        name: &str,
-        event: &GraphHookEvent,
-    ) -> Result<(String, Option<String>), HookExecution> {
-        match self.db.resolve_target_session_name(name) {
-            Err(error) => Err(HookExecution {
-                status: GraphRunStatus::Fail,
-                output: serde_json::json!({
-                    "target_session_name": name,
-                    "error": error.to_string(),
-                }),
-                summary: format!(
-                    "{} hook could not resolve target session name '{name}': {error}",
-                    event.as_str()
-                ),
-            }),
-            Ok(SessionTarget::Missing) => Err(HookExecution {
-                status: GraphRunStatus::Fail,
-                output: serde_json::json!({
-                    "target_session_name": name,
-                    "error": "session does not exist or is no longer live",
-                }),
-                summary: format!(
-                    "{} hook target session name '{name}' does not exist or is no longer live; message not enqueued.",
-                    event.as_str()
-                ),
-            }),
-            Ok(SessionTarget::Found { id, name }) => Ok((id, name)),
-            Ok(SessionTarget::Ambiguous(many)) => Err(HookExecution {
-                status: GraphRunStatus::Fail,
-                output: serde_json::json!({
-                    "target_session_name": name,
-                    "error": "multiple live sessions share this name",
-                    "matching_ids": many,
-                }),
-                summary: format!(
-                    "{} hook target session name '{name}' matches {} live sessions ({}); message not enqueued.",
-                    event.as_str(),
-                    many.len(),
-                    many.join(", ")
-                ),
-            }),
-        }
-    }
-
     pub(crate) fn resolve_interactive_target(
         &self,
         hook: &GraphCompletionHook,
@@ -121,22 +74,47 @@ impl GraphEngine {
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty());
-        if let Some(id) = target_id_cfg {
-            return Ok((id.to_string(), None));
+        if target_id_cfg.is_none() && target_name_cfg.is_none() {
+            return Err(HookExecution {
+                status: GraphRunStatus::Fail,
+                output: serde_json::json!({
+                    "error": "interactive hook has no target session id or name",
+                }),
+                summary: format!(
+                    "{} hook has no target session id or name; message not enqueued.",
+                    event.as_str()
+                ),
+            });
         }
-        if let Some(name) = target_name_cfg {
-            return self.resolve_target_by_name(name, event);
+        match self
+            .db
+            .resolve_target_session(target_id_cfg, target_name_cfg)
+        {
+            Ok(resolved) => Ok((resolved.id, Some(resolved.name))),
+            Err(err) => {
+                let mut output = serde_json::json!({
+                    "error": err.to_string(),
+                });
+                if let Some(name) = target_name_cfg {
+                    output["target_session_name"] = Value::String(name.to_string());
+                }
+                if let Some(id) = target_id_cfg {
+                    output["target_session_id"] = Value::String(id.to_string());
+                }
+                if let Some(ids) = err.matching_ids() {
+                    output["matching_ids"] = serde_json::json!(ids);
+                }
+                Err(HookExecution {
+                    status: GraphRunStatus::Fail,
+                    output,
+                    summary: format!(
+                        "{} hook could not resolve target: {}; message not enqueued.",
+                        event.as_str(),
+                        err
+                    ),
+                })
+            }
         }
-        Err(HookExecution {
-            status: GraphRunStatus::Fail,
-            output: serde_json::json!({
-                "error": "interactive hook has no target session id or name",
-            }),
-            summary: format!(
-                "{} hook has no target session id or name; message not enqueued.",
-                event.as_str()
-            ),
-        })
     }
 
     pub(crate) fn render_interactive_hook_prompt(

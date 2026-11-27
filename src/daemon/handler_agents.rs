@@ -16,7 +16,7 @@ use crate::daemon::handler_formatting::{
 use crate::daemon::handler_helpers::{
     apply_scalar_updates, apply_trigger_updates, handle_timed_out_run, new_agent_base,
     parse_report_status, prepare_cron_task, prepare_watch_task, update_agent_last_run,
-    validate_report_summary, validate_run_transition, watcher_restart_needed,
+    validate_report_summary, validate_run_transition,
 };
 use crate::daemon::handler_send_session::{
     build_send_action, caller_session_id, classify_action, AddAction,
@@ -27,7 +27,6 @@ use crate::daemon::params_extract::Parameters;
 use crate::daemon::process::RealRunner;
 use crate::domain::canopy_config::CanopyConfig;
 use crate::domain::daemon_config::DaemonConfig;
-use crate::domain::models::Agent;
 use crate::domain::models::Trigger;
 use crate::domain::models::{AgentAction, Cli};
 use crate::domain::validation::validate_id;
@@ -302,6 +301,34 @@ impl TaskTriggerHandler {
         Ok(CallToolResult::success(vec![ContentBlock::text(
             lines.join("\n"),
         )]))
+    }
+
+    /// Rename a live interactive session.
+    #[tool(
+        name = "session_rename",
+        description = "Rename a live interactive session. target accepts a live session id or name; new_name must be 1-32 chars of lowercase a-z, digits, or '-'."
+    )]
+    pub(crate) async fn session_rename(
+        &self,
+        Parameters(params): Parameters<SessionRenameParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let target = params.target.trim();
+        if target.is_empty() {
+            return Ok(error_result("Target session id or name must not be empty."));
+        }
+        match crate::sessions::rename::rename_live_session(
+            &self.db,
+            self.hub.as_deref(),
+            target,
+            &params.new_name,
+        ) {
+            Ok(result) => Ok(build_json_result(&serde_json::json!({
+                "id": result.id,
+                "old_name": result.old_name,
+                "new_name": result.new_name,
+            }))),
+            Err(err) => Ok(error_result(&err)),
+        }
     }
 
     /// Remove an agent completely.
@@ -733,47 +760,5 @@ impl TaskTriggerHandler {
             "Run '{}' status updated to '{}'.",
             params.run_id, status
         )))
-    }
-}
-
-impl TaskTriggerHandler {
-    pub(crate) async fn restart_updated_watcher(
-        &self,
-        params: &TaskUpdateParams,
-        agent: &Agent,
-    ) -> Result<Option<CallToolResult>, McpError> {
-        // A rename always needs the watcher to end up running under the new
-        // id, even if no other watch-related field changed.
-        let renamed = agent.id != params.id;
-        if !agent.is_watch() || (!watcher_restart_needed(params) && !renamed) {
-            return Ok(None);
-        }
-
-        // The watcher for a renamed agent may already have been stopped
-        // under the old id before the rename; stopping it again here is a
-        // harmless no-op. Backing graphs are keyed by agent id.
-        let _ = self.watcher_engine.stop_watcher(&params.id).await;
-        let _ = self.watcher_engine.stop_graph_watcher(&agent.id).await;
-        if !agent.enabled {
-            return Ok(None);
-        }
-
-        let Some(backing) = self.db.get_graph(&agent.id).map_err(internal_error)? else {
-            return Ok(Some(CallToolResult::success(vec![ContentBlock::text(format!(
-                "Agent '{}' updated but watcher failed to restart: backing graph missing. It will be retried on daemon restart.",
-                agent.id
-            ))])));
-        };
-        let Err(e) = self.watcher_engine.start_graph_watcher(&backing).await else {
-            return Ok(Some(success_result(&format!(
-                "Agent '{}' updated successfully. Watcher restarted with new configuration.",
-                agent.id
-            ))));
-        };
-
-        Ok(Some(CallToolResult::success(vec![ContentBlock::text(format!(
-            "Agent '{}' updated but watcher failed to restart: {}. It will be retried on daemon restart.",
-            agent.id, e
-        ))])))
     }
 }

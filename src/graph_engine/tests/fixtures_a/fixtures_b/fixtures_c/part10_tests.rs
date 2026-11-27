@@ -843,10 +843,11 @@ async fn interactive_hook_name_fails_when_multiple_live_matches() {
         .is_empty());
 }
 
-/// CM27: an id-configured hook is byte-for-byte unaffected by name
-/// resolution — its provenance carries no target_session_name.
+/// CM27: an id-configured hook still resolves by id, and its provenance
+/// carries the resolved live session name (id-targeted sends resolve the
+/// live name consistently).
 #[tokio::test]
-async fn interactive_hook_id_based_hook_unaffected_by_name_resolution() {
+async fn interactive_hook_id_based_hook_records_resolved_name() {
     let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
     let workdir = db.get_graph(&graph_id).unwrap().unwrap().workdir.clone();
     db.insert_interactive_session(
@@ -895,7 +896,11 @@ async fn interactive_hook_id_based_hook_unaffected_by_name_resolution() {
     assert_eq!(due.len(), 1);
     assert_eq!(due[0].target_session_id, "session-live");
     let provenance = due[0].provenance.as_ref().expect("provenance populated");
-    assert!(provenance.target_session_name.is_none());
+    assert_eq!(
+        provenance.target_session_name.as_deref(),
+        Some("operator"),
+        "id-targeted hook resolves the live session name consistently"
+    );
 }
 
 // ── CH2: command hook tests ────────────────────────────────────────

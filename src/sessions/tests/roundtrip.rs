@@ -181,7 +181,7 @@ fn agent_spawn_preserves_dialog_launch_fields() {
     };
     let (session, _guard) = KillGuard::spawn(&hub, &req);
     assert_eq!(session.id, "sess-resume-1");
-    assert_eq!(session.name, "resume-name");
+    assert_eq!(session.name(), "resume-name");
     let args = db
         .get_interactive_session_args(&session.id)
         .expect("db read")
@@ -240,7 +240,7 @@ fn hub_spawn_from_the_resume_step_keeps_the_source_id_and_name() {
     };
     let (session, _guard) = KillGuard::spawn(&hub, &req);
     assert_eq!(session.id, "sess-resume-2");
-    assert_eq!(session.name, "marasmius");
+    assert_eq!(session.name(), "marasmius");
     assert_eq!(
         db.count_interactive_sessions().expect("count rows"),
         1,

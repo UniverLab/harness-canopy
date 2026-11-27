@@ -116,6 +116,11 @@ pub fn session_removed_frame(id: &str) -> String {
     serde_json::json!({"t": "session_removed", "id": id}).to_string()
 }
 
+/// `session_renamed{id,name}`, broadcast to every connection.
+pub fn session_renamed_frame(id: &str, name: &str) -> String {
+    serde_json::json!({"t": "session_renamed", "id": id, "name": name}).to_string()
+}
+
 /// `spawned{req,id}`, the answer to `spawn`.
 pub fn spawned_frame(req: &str, id: &str) -> String {
     serde_json::json!({"t": "spawned", "req": req, "id": id}).to_string()

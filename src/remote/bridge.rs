@@ -45,9 +45,9 @@ use crate::sessions::graphs::{
 };
 use crate::sessions::protocol::{
     error_frame, exited_frame, ok_frame, parse_client_frame, resized_frame, session_added_frame,
-    session_removed_frame, sessions_frame, shelf_added_frame, shelf_missing_frame,
-    shelf_removed_frame, ClientFrame, SessionItem, SpawnExt, ERR_BAD_REQUEST, ERR_DELIVERY_FAILED,
-    ERR_FORBIDDEN, ERR_INTERNAL, ERR_NOT_FOUND, ERR_SPAWN_FAILED,
+    session_removed_frame, session_renamed_frame, sessions_frame, shelf_added_frame,
+    shelf_missing_frame, shelf_removed_frame, ClientFrame, SessionItem, SpawnExt, ERR_BAD_REQUEST,
+    ERR_DELIVERY_FAILED, ERR_FORBIDDEN, ERR_INTERNAL, ERR_NOT_FOUND, ERR_SPAWN_FAILED,
 };
 use crate::sessions::protocol_resume::{handle_resumable_list, handle_session_resume};
 use crate::sessions::ws::no_such_session;
@@ -440,6 +440,20 @@ impl RemoteBridge {
                     send(out, session_removed_frame(&id));
                 }
             }
+            HubEvent::SessionRenamed { id, name } => {
+                if self.scope.allows(&name) {
+                    self.scope.note_listed(&id, &name);
+                    send(out, session_renamed_frame(&id, &name));
+                } else if self
+                    .scope
+                    .removed_forwards(&id, self.attached.contains_key(&id))
+                {
+                    if let Some(task) = self.attached.remove(&id) {
+                        task.abort();
+                    }
+                    send(out, session_removed_frame(&id));
+                }
+            }
             HubEvent::Exited { id, code, to_all } => {
                 if self
                     .scope
@@ -551,7 +565,7 @@ impl RemoteBridge {
             .hub
             .list()
             .iter()
-            .filter(|session| self.scope.allows(&session.name))
+            .filter(|session| self.scope.allows(&session.name()))
             .map(|session| session.item())
             .collect();
         items.sort_by(|a, b| a.id.cmp(&b.id));

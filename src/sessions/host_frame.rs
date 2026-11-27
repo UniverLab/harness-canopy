@@ -57,6 +57,11 @@ pub enum HostFrame {
     SessionRemoved {
         id: String,
     },
+    /// `session_renamed{id,name}`: a session's display name changed.
+    SessionRenamed {
+        id: String,
+        name: String,
+    },
     Spawned {
         req: String,
         id: String,
@@ -225,6 +230,10 @@ enum HostFrameWire {
     SessionRemoved {
         id: String,
     },
+    SessionRenamed {
+        id: String,
+        name: String,
+    },
     Spawned {
         req: String,
         id: String,
@@ -334,6 +343,7 @@ pub fn parse_host_frame(text: &str) -> Result<HostFrame, String> {
             item: Box::new(item),
         },
         HostFrameWire::SessionRemoved { id } => HostFrame::SessionRemoved { id },
+        HostFrameWire::SessionRenamed { id, name } => HostFrame::SessionRenamed { id, name },
         HostFrameWire::Spawned { req, id } => HostFrame::Spawned { req, id },
         HostFrameWire::Ok { req } => HostFrame::Ok { req },
         HostFrameWire::Error { req, code, message } => HostFrame::Error { req, code, message },

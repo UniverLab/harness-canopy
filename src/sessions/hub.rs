@@ -116,7 +116,7 @@ struct OutputState {
 /// One daemon-owned PTY session.
 pub struct HubSession {
     pub id: String,
-    pub name: String,
+    name: Mutex<String>,
     pub kind: SessionKind,
     pub cli: String,
     pub model: Option<String>,
@@ -173,6 +173,18 @@ pub struct SpawnRequest {
 }
 
 impl HubSession {
+    /// Current display name. Mutable at runtime via rename.
+    pub fn name(&self) -> String {
+        self.name.lock().ok().map(|n| n.clone()).unwrap_or_default()
+    }
+
+    /// Update the display name (used by session rename).
+    pub fn set_name(&self, name: String) {
+        if let Ok(mut guard) = self.name.lock() {
+            *guard = name;
+        }
+    }
+
     /// Ingest one PTY output chunk: feed the parser, bump `seq`, stamp
     /// `last_output_at`, and publish `(seq, chunk)` — all under the parser
     /// lock. The reader thread calls this per chunk; tests call it directly
@@ -318,7 +330,7 @@ impl HubSession {
         let status = self.status();
         SessionItem {
             id: self.id.clone(),
-            name: self.name.clone(),
+            name: self.name(),
             kind: self.kind.as_str().to_string(),
             cli: self.cli.clone(),
             model: self.model.clone(),
@@ -493,7 +505,7 @@ impl SessionHub {
             .inner
             .sessions
             .lock()
-            .map(|map| map.values().map(|s| s.name.clone()).collect())
+            .map(|map| map.values().map(|s| s.name()).collect())
             .unwrap_or_default();
         let existing_refs: Vec<&str> = existing.iter().map(String::as_str).collect();
         let live_ids: std::collections::HashSet<String> = self
@@ -549,7 +561,7 @@ impl SessionHub {
         let now = Utc::now();
         let session = Arc::new(HubSession {
             id: id.clone(),
-            name,
+            name: Mutex::new(name),
             kind: req.kind,
             cli: req.cli.clone(),
             model: req.model.clone(),
@@ -598,9 +610,10 @@ impl SessionHub {
         match req.kind {
             SessionKind::Agent => {
                 let boot_id = crate::system::boot_id();
+                let session_name = session.name();
                 let registration = SessionRegistration {
                     id: &session.id,
-                    name: &session.name,
+                    name: &session_name,
                     cli: req.cli.as_str(),
                     working_dir: req.workdir.as_str(),
                     args,
@@ -615,9 +628,10 @@ impl SessionHub {
                 }
             }
             SessionKind::Terminal => {
+                let session_name = session.name();
                 let _ = self.inner.db.insert_terminal_session(
                     &session.id,
-                    &session.name,
+                    &session_name,
                     req.cli.as_str(),
                     req.workdir.as_str(),
                 );

@@ -244,6 +244,8 @@ pub struct TaskTriggerHandler {
     pub dynamic_skills: Arc<crate::dynamic_skills::SkillStore>,
     /// The session shelf's bytes + rows owner (`session_send_file`).
     pub(crate) shelf: Arc<crate::sessions::shelf::ShelfStore>,
+    /// Live session hub, when the daemon serves interactive sessions.
+    pub hub: Option<Arc<crate::sessions::SessionHub>>,
     pub start_time: std::time::Instant,
     pub port: u16,
     #[allow(dead_code)]
@@ -262,6 +264,8 @@ pub struct HandlerDeps {
     pub ingestion: Arc<crate::rag::ingestion::IngestionManager>,
     pub dynamic_skills: Arc<crate::dynamic_skills::SkillStore>,
     pub shelf: Arc<crate::sessions::shelf::ShelfStore>,
+    /// Live session hub, when the daemon serves interactive sessions.
+    pub hub: Option<Arc<crate::sessions::SessionHub>>,
     /// CB83: the daemon process start instant, captured once when the
     /// daemon starts (see `run_http_server` / `stdio_server_startup` in
     /// `server.rs`) and handed to every handler. `agent_status` `Uptime`
@@ -283,6 +287,7 @@ impl TaskTriggerHandler {
             ingestion,
             dynamic_skills,
             shelf,
+            hub,
             start_time,
             port,
         } = deps;
@@ -299,6 +304,7 @@ impl TaskTriggerHandler {
             rag_limiters: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             dynamic_skills,
             shelf,
+            hub,
             start_time,
             port,
             tool_router: Self::tool_router(),

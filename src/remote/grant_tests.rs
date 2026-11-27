@@ -158,7 +158,7 @@ fn spawn_named(
         preserve_args: false,
     };
     let session = hub.spawn(&request).expect("test spawn");
-    assert_eq!(session.name, name);
+    assert_eq!(session.name(), name);
     let guard = KillGuard {
         hub: hub.clone(),
         id: session.id.clone(),

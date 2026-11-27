@@ -306,7 +306,7 @@ fn resolve_part<'a>(
         .and_then(|provenance| hook_graph_name(db, provenance));
     let session_name = provenance
         .and_then(|provenance| provenance.session_id.as_deref())
-        .and_then(|id| hub.get(id).map(|session| session.name.clone()));
+        .and_then(|id| hub.get(id).map(|session| session.name()));
     let agent_name = provenance.and_then(|provenance| trigger_agent_name(db, provenance));
     ResolvedPart {
         send,
@@ -540,7 +540,7 @@ fn hold_send(hub: &SessionHub, send: &ScheduledPrompt, held: &mut HeldTracker) {
     if held.held_overdue(&send.id) {
         let name = hub
             .get(&send.target_session_id)
-            .map(|session| session.name.clone())
+            .map(|session| session.name())
             .unwrap_or_else(|| send.target_session_id.clone());
         send_notification(
             "Scheduled send held",

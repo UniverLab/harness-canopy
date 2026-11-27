@@ -1534,7 +1534,7 @@ async fn resume_without_injection() {
         .expect("resume starts a process");
 
     let resumed = hub.get("resume-no-seed").expect("session resumed");
-    assert_eq!(resumed.name, "resume-no-seed");
+    assert_eq!(resumed.name(), "resume-no-seed");
     assert_eq!(
         db.get_interactive_session_status("resume-no-seed")
             .unwrap()
