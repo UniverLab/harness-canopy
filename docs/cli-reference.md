@@ -1098,6 +1098,7 @@ drain; specs with no recorded session produce no message.
 | `canopy calendar milestone add <title> --project <path> [--due <rfc3339>] [--notes <text>] [--status planned\|active\|done]` | Add a project milestone |
 | `canopy calendar milestone set <id> --status planned\|active\|done [--due <rfc3339>]` | Update a milestone's status and optional due date |
 | `canopy calendar milestone remove <id>` | Remove a project milestone |
+| `canopy calendar export [--out <path>] [--include-milestones]` | Export calendar events (and optionally milestones with `due_at`) as RFC 5545 `.ics` |
 
 All `canopy calendar` subcommands delegate to the running daemon's `calendar`
 MCP tool. For events, `--recurrence` defaults to `none` and `--lead` defaults to

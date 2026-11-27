@@ -92,3 +92,10 @@ pub struct CalendarUpdateMilestoneParams {
     /// New status: planned, active, or done.
     pub status: Option<String>,
 }
+
+/// `calendar` `export_ics` parameters.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CalendarExportIcsParams {
+    /// Include milestones that have `due_at` set (default false).
+    pub include_milestones: Option<bool>,
+}

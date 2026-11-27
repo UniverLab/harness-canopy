@@ -7,6 +7,7 @@
 
 pub mod calendar_alerts;
 pub mod cron_scheduler;
+pub mod ics_refresh;
 
 use chrono::Utc;
 

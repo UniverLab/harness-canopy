@@ -648,6 +648,8 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
     graph_scheduled_runs::GRAPH_SCHEDULED_RUNS_SCHEMA,
     // Personal calendar events and per-project milestones.
     calendar::CALENDAR_SCHEMA,
+    // Cached read-only external .ics feed items.
+    calendar_feeds::CALENDAR_FEEDS_SCHEMA,
 ];
 
 impl Database {
@@ -723,6 +725,7 @@ impl Database {
         Self::migrate_graph_enabled_columns(&conn)?;
         Self::migrate_graph_scheduled_runs(&conn)?;
         Self::migrate_calendar_tables(&conn)?;
+        Self::migrate_calendar_feeds(&conn)?;
 
         Self::set_schema_version(&conn)?;
 
@@ -737,6 +740,7 @@ pub mod activity_log;
 pub mod agent;
 pub mod agent_backing;
 pub mod calendar;
+pub mod calendar_feeds;
 pub mod clean;
 pub(crate) mod connection;
 pub mod crew_binding;

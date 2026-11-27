@@ -19,6 +19,7 @@ pub mod db_paths;
 pub mod gamification;
 pub mod graph_transfer;
 pub mod graphs;
+pub mod ics;
 pub mod instruction_file;
 pub mod models;
 pub mod models_db;

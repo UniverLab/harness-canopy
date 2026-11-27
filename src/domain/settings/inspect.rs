@@ -312,26 +312,16 @@ pub fn config_value(config: &CanopyConfig, key: &str) -> Value {
         | "scheduler.retry_delay_minutes"
         | "scheduler.retry_max"
         | "scheduler.delivery_merge_window_s" => scheduler_value(&config.scheduler, key),
-        "graphs.max_iterations_per_node" => {
-            Value::from(config.graphs.max_iterations_per_node as i64)
-        }
-        "graphs.infra_retry_limit" => Value::from(config.graphs.infra_retry_limit as i64),
-        "graphs.infra_crash_max_seconds" => {
-            Value::from(config.graphs.infra_crash_max_seconds as i64)
-        }
-        "graphs.infra_backoff_seconds" => Value::from(config.graphs.infra_backoff_seconds as i64),
-        "graphs.straggler_timeout_minutes" => {
-            Value::from(config.graphs.straggler_timeout_minutes as i64)
-        }
-        "graphs.ensemble_max_members_parallel" => {
-            Value::from(config.graphs.ensemble_max_members_parallel as i64)
-        }
-        "graphs.ensemble_max_members_sequential" => {
-            Value::from(config.graphs.ensemble_max_members_sequential as i64)
-        }
-        "graphs.check_output_max_kib" => Value::from(config.graphs.check_output_max_kib as i64),
-        "graphs.verdict_grace_seconds" => Value::from(config.graphs.verdict_grace_seconds as i64),
-        "graphs.catalogue_url" => Value::from(config.graphs.catalogue_url.clone()),
+        "graphs.max_iterations_per_node"
+        | "graphs.infra_retry_limit"
+        | "graphs.infra_crash_max_seconds"
+        | "graphs.infra_backoff_seconds"
+        | "graphs.straggler_timeout_minutes"
+        | "graphs.ensemble_max_members_parallel"
+        | "graphs.ensemble_max_members_sequential"
+        | "graphs.check_output_max_kib"
+        | "graphs.verdict_grace_seconds"
+        | "graphs.catalogue_url" => graphs_value(&config.graphs, key),
         "agents.probe_timeout_seconds" => Value::from(config.agents.probe_timeout_seconds as i64),
         "clean.reclaim_min_deleted_rows" => {
             Value::from(config.clean.reclaim_min_deleted_rows as i64)
@@ -342,21 +332,73 @@ pub fn config_value(config: &CanopyConfig, key: &str) -> Value {
         "update.check_enabled" => Value::from(config.update.check_enabled),
         "update.check_interval_hours" => Value::from(config.update.check_interval_hours as i64),
         "notifications.enabled" => Value::from(config.notifications.enabled),
-        "tui.datetime_format" => Value::from(config.tui.datetime_format.clone()),
-        "tui.time_format" => Value::from(config.tui.time_format.clone()),
-        "tui.panel_dwell_seconds" => Value::from(config.tui.panel_dwell_seconds as i64),
-        "tui.brians_brain" => Value::from(config.tui.brians_brain),
-        "tui.atmosphere" => Value::from(config.tui.atmosphere),
-        "tui.scroll_step" => Value::from(config.tui.scroll_step as i64),
-        "tui.page_step" => Value::from(config.tui.page_step as i64),
-        "tui.animations" => Value::from(config.tui.animations.as_str()),
-        "remote.enabled" => Value::from(config.remote.enabled),
-        "remote.relay_url" => Value::from(config.remote.relay_url.clone()),
-        "remote.github_client_id" => Value::from(config.remote.github_client_id.clone()),
-        "remote.host_label" => Value::from(config.remote.host_label.clone()),
-        "remote.shelf_max_file_mb" => Value::from(config.remote.shelf_max_file_mb as i64),
-        "remote.stun_fallback" => Value::from(config.remote.stun_fallback.clone()),
+        "tui.datetime_format"
+        | "tui.time_format"
+        | "tui.panel_dwell_seconds"
+        | "tui.brians_brain"
+        | "tui.atmosphere"
+        | "tui.scroll_step"
+        | "tui.page_step"
+        | "tui.animations" => tui_value(&config.tui, key),
+        "remote.enabled"
+        | "remote.relay_url"
+        | "remote.github_client_id"
+        | "remote.host_label"
+        | "remote.shelf_max_file_mb"
+        | "remote.stun_fallback" => remote_value(&config.remote, key),
         "daemon.cpu_quota_percent" => Value::from(config.daemon.cpu_quota_percent as i64),
+        "calendar.feeds" => {
+            Value::from(toml::to_string(&config.calendar.feeds).unwrap_or_else(|_| String::new()))
+        }
+        _ => Value::from(String::new()),
+    }
+}
+
+/// Rendered `[remote]` value for `config list`, by registry key.
+fn remote_value(remote: &crate::domain::canopy_config::RemoteConfig, key: &str) -> Value {
+    match key {
+        "remote.enabled" => Value::from(remote.enabled),
+        "remote.relay_url" => Value::from(remote.relay_url.clone()),
+        "remote.github_client_id" => Value::from(remote.github_client_id.clone()),
+        "remote.host_label" => Value::from(remote.host_label.clone()),
+        "remote.shelf_max_file_mb" => Value::from(remote.shelf_max_file_mb as i64),
+        "remote.stun_fallback" => Value::from(remote.stun_fallback.clone()),
+        _ => Value::from(String::new()),
+    }
+}
+
+/// Rendered `[graphs]` value for `config list`, by registry key.
+fn graphs_value(graphs: &crate::domain::canopy_config::GraphsConfig, key: &str) -> Value {
+    match key {
+        "graphs.max_iterations_per_node" => Value::from(graphs.max_iterations_per_node as i64),
+        "graphs.infra_retry_limit" => Value::from(graphs.infra_retry_limit as i64),
+        "graphs.infra_crash_max_seconds" => Value::from(graphs.infra_crash_max_seconds as i64),
+        "graphs.infra_backoff_seconds" => Value::from(graphs.infra_backoff_seconds as i64),
+        "graphs.straggler_timeout_minutes" => Value::from(graphs.straggler_timeout_minutes as i64),
+        "graphs.ensemble_max_members_parallel" => {
+            Value::from(graphs.ensemble_max_members_parallel as i64)
+        }
+        "graphs.ensemble_max_members_sequential" => {
+            Value::from(graphs.ensemble_max_members_sequential as i64)
+        }
+        "graphs.check_output_max_kib" => Value::from(graphs.check_output_max_kib as i64),
+        "graphs.verdict_grace_seconds" => Value::from(graphs.verdict_grace_seconds as i64),
+        "graphs.catalogue_url" => Value::from(graphs.catalogue_url.clone()),
+        _ => Value::from(String::new()),
+    }
+}
+
+/// Rendered `[tui]` value for `config list`, by registry key.
+fn tui_value(tui: &crate::domain::canopy_config::TuiConfig, key: &str) -> Value {
+    match key {
+        "tui.datetime_format" => Value::from(tui.datetime_format.clone()),
+        "tui.time_format" => Value::from(tui.time_format.clone()),
+        "tui.panel_dwell_seconds" => Value::from(tui.panel_dwell_seconds as i64),
+        "tui.brians_brain" => Value::from(tui.brians_brain),
+        "tui.atmosphere" => Value::from(tui.atmosphere),
+        "tui.scroll_step" => Value::from(tui.scroll_step as i64),
+        "tui.page_step" => Value::from(tui.page_step as i64),
+        "tui.animations" => Value::from(tui.animations.as_str()),
         _ => Value::from(String::new()),
     }
 }

@@ -61,6 +61,17 @@ pub(super) fn next_fire_utc(
         .map(|next_local| next_local.with_timezone(&Utc))
 }
 
+/// Compute the next fire instant (in UTC) for a cron expression string,
+/// evaluated against `now_local`. Returns `None` if unparseable or no future
+/// occurrence exists.
+pub(crate) fn next_cron_occurrence_utc(
+    schedule_expr: &str,
+    now_local: DateTime<Local>,
+) -> Option<DateTime<Utc>> {
+    let schedule = Schedule::from_str(&to_7field_cron(schedule_expr)).ok()?;
+    next_fire_utc(&schedule, now_local)
+}
+
 /// Parse `schedule_expr` and, if it yields a nearer next fire than `earliest`,
 /// update `earliest`. A `None` expression or an unparseable one is skipped.
 pub(super) fn fold_earliest(

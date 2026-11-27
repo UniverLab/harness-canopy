@@ -4,7 +4,7 @@ use chrono::{DateTime, Local, SecondsFormat, Utc};
 use uuid::Uuid;
 
 use crate::db::Database;
-use crate::domain::calendar::{alert_at, parse_rfc3339_utc, CalendarEvent};
+use crate::domain::calendar::{alert_at, parse_rfc3339_utc, CalendarEvent, CalendarFeedItem};
 use crate::domain::notification::NotificationLevel;
 use crate::sessions::protocol::ToastNotification;
 use crate::sessions::{HubEvent, SessionHub};
@@ -12,68 +12,105 @@ use crate::sessions::{HubEvent, SessionHub};
 /// Default snooze duration offered on calendar reminder toasts.
 pub const DEFAULT_SNOOZE_MINUTES: u32 = 5;
 
-/// Compute the effective alert instant for `event`, or `None` if dismissed or invalid.
-pub fn effective_alert_at(event: &CalendarEvent) -> Option<DateTime<Utc>> {
-    if event.dismissed_at.is_some() {
+struct AlertFields<'a> {
+    at: &'a str,
+    lead_minutes: i64,
+    snoozed_until: Option<&'a str>,
+    dismissed_at: Option<&'a str>,
+    last_notified_at: Option<&'a str>,
+    notes: Option<&'a str>,
+}
+
+impl<'a> From<&'a CalendarEvent> for AlertFields<'a> {
+    fn from(ev: &'a CalendarEvent) -> Self {
+        Self {
+            at: &ev.at,
+            lead_minutes: ev.lead_minutes,
+            snoozed_until: ev.snoozed_until.as_deref(),
+            dismissed_at: ev.dismissed_at.as_deref(),
+            last_notified_at: ev.last_notified_at.as_deref(),
+            notes: ev.notes.as_deref(),
+        }
+    }
+}
+
+impl<'a> From<&'a CalendarFeedItem> for AlertFields<'a> {
+    fn from(item: &'a CalendarFeedItem) -> Self {
+        Self {
+            at: &item.at,
+            lead_minutes: item.lead_minutes,
+            snoozed_until: item.snoozed_until.as_deref(),
+            dismissed_at: item.dismissed_at.as_deref(),
+            last_notified_at: item.last_notified_at.as_deref(),
+            notes: item.notes.as_deref(),
+        }
+    }
+}
+
+fn effective_alert_at_fields(fields: &AlertFields<'_>) -> Option<DateTime<Utc>> {
+    if fields.dismissed_at.is_some() {
         return None;
     }
-    if let Some(ref snoozed) = event.snoozed_until {
+    if let Some(snoozed) = fields.snoozed_until {
         return parse_rfc3339_utc(snoozed).ok();
     }
-    let at = parse_rfc3339_utc(&event.at).ok()?;
-    Some(alert_at(at, event.lead_minutes))
+    let at = parse_rfc3339_utc(fields.at).ok()?;
+    Some(alert_at(at, fields.lead_minutes))
 }
 
-/// Return `true` when `event` is due at `now` and has not yet notified for its current alert instant.
-pub fn is_due(event: &CalendarEvent, now: DateTime<Utc>) -> bool {
-    let Some(eff) = effective_alert_at(event) else {
-        return false;
-    };
-    if now < eff {
-        return false;
-    }
-    !already_notified_for(event, eff)
-}
-
-fn already_notified_for(event: &CalendarEvent, eff: DateTime<Utc>) -> bool {
-    event
+fn already_notified_for_fields(fields: &AlertFields<'_>, eff: DateTime<Utc>) -> bool {
+    fields
         .last_notified_at
-        .as_deref()
         .and_then(|raw| parse_rfc3339_utc(raw).ok())
         .is_some_and(|last| last >= eff)
 }
 
-/// Return the earliest pending (not yet notified) calendar alert instant across active events.
-pub fn next_calendar_alert_at(db: &Database) -> Option<DateTime<Utc>> {
-    let events = db.list_calendar_events(None, None, false).ok()?;
-    events
-        .iter()
-        .filter_map(|event| {
-            let eff = effective_alert_at(event)?;
-            if already_notified_for(event, eff) {
-                None
-            } else {
-                Some(eff)
-            }
-        })
-        .min()
+fn is_due_fields(fields: &AlertFields<'_>, now: DateTime<Utc>) -> bool {
+    let Some(eff) = effective_alert_at_fields(fields) else {
+        return false;
+    };
+    now >= eff && !already_notified_for_fields(fields, eff)
 }
 
-fn format_alert_body(event: &CalendarEvent) -> String {
-    let time_str = parse_rfc3339_utc(&event.at)
+/// Compute the effective alert instant for `event`, or `None` if dismissed or invalid.
+#[cfg(test)]
+pub fn effective_alert_at(event: &CalendarEvent) -> Option<DateTime<Utc>> {
+    effective_alert_at_fields(&AlertFields::from(event))
+}
+
+/// Return the earliest pending (not yet notified) calendar alert instant across active events and feed items.
+pub fn next_calendar_alert_at(db: &Database) -> Option<DateTime<Utc>> {
+    let events = db.list_calendar_events(None, None, false).ok()?;
+    let feed_items = db.list_calendar_feed_items(None, false).unwrap_or_default();
+
+    let next_ev = events.iter().filter_map(|e| {
+        let f = AlertFields::from(e);
+        let eff = effective_alert_at_fields(&f)?;
+        (!already_notified_for_fields(&f, eff)).then_some(eff)
+    });
+    let next_feed = feed_items.iter().filter_map(|item| {
+        let f = AlertFields::from(item);
+        let eff = effective_alert_at_fields(&f)?;
+        (!already_notified_for_fields(&f, eff)).then_some(eff)
+    });
+    next_ev.chain(next_feed).min()
+}
+
+fn format_alert_body(fields: &AlertFields<'_>) -> String {
+    let time_str = parse_rfc3339_utc(fields.at)
         .map(|dt| {
             dt.with_timezone(&Local)
                 .format("%Y-%m-%d %H:%M")
                 .to_string()
         })
-        .unwrap_or_else(|_| event.at.clone());
-    match event.notes.as_deref().map(str::trim) {
+        .unwrap_or_else(|_| fields.at.to_string());
+    match fields.notes.map(str::trim) {
         Some(notes) if !notes.is_empty() => format!("{time_str} - {notes}"),
         _ => time_str,
     }
 }
 
-/// Fire native OS notifications and `HubEvent::Toast` for every due calendar event.
+/// Fire native OS notifications and `HubEvent::Toast` for every due calendar event and `.ics` feed item.
 pub fn fire_due_calendar_alerts<F>(
     db: &Database,
     hub: Option<&SessionHub>,
@@ -85,15 +122,17 @@ where
 {
     let now_str = now_utc.to_rfc3339_opts(SecondsFormat::Secs, true);
     let events = db.list_calendar_events(None, None, false)?;
+    let feed_items = db.list_calendar_feed_items(None, false)?;
     let mut fired = 0;
 
     for event in &events {
-        if !is_due(event, now_utc) {
+        let fields = AlertFields::from(event);
+        if !is_due_fields(&fields, now_utc) {
             continue;
         }
         db.record_calendar_event_notified(&event.id, &now_str)?;
         let notif_title = format!("Canopy Calendar: {}", event.title);
-        let body = format_alert_body(event);
+        let body = format_alert_body(&fields);
         notify_fn(&notif_title, &body, NotificationLevel::Info);
         if let Some(hub) = hub {
             hub.emit(HubEvent::Toast(ToastNotification {
@@ -102,6 +141,29 @@ where
                 title: event.title.clone(),
                 body,
                 event_at: event.at.clone(),
+                snooze_minutes: DEFAULT_SNOOZE_MINUTES,
+            }));
+        }
+        fired += 1;
+    }
+
+    for item in &feed_items {
+        let fields = AlertFields::from(item);
+        if !is_due_fields(&fields, now_utc) {
+            continue;
+        }
+        db.record_calendar_feed_item_notified(&item.id, &now_str)?;
+        let display_title = format!("[{}] {}", item.feed_name, item.title);
+        let notif_title = format!("Canopy Calendar: {display_title}");
+        let body = format_alert_body(&fields);
+        notify_fn(&notif_title, &body, NotificationLevel::Info);
+        if let Some(hub) = hub {
+            hub.emit(HubEvent::Toast(ToastNotification {
+                id: Uuid::new_v4().to_string(),
+                event_id: item.id.clone(),
+                title: display_title,
+                body,
+                event_at: item.at.clone(),
                 snooze_minutes: DEFAULT_SNOOZE_MINUTES,
             }));
         }
@@ -255,6 +317,30 @@ mod tests {
         assert_eq!(
             effective_alert_at(&dismissed_daily),
             Some(parse_rfc3339_utc("2026-11-28T09:50:00Z").unwrap())
+        );
+    }
+
+    #[test]
+    fn feed_item_alerts_fire_dedup_and_snooze() {
+        use crate::domain::ics::parse_ics;
+
+        let (_dir, db) = temp_db();
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:f1\r\nSUMMARY:Feed Call\r\nDTSTART:20261127T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        db.upsert_calendar_feed_items("Work", &parse_ics(ics))
+            .unwrap();
+
+        let at_lead = parse_rfc3339_utc("2026-11-27T09:50:00Z").unwrap();
+        let mut titles = Vec::new();
+        assert_eq!(
+            fire_due_calendar_alerts(&db, None, |t, _, _| titles.push(t.to_string()), at_lead)
+                .unwrap(),
+            1
+        );
+        assert_eq!(titles, vec!["Canopy Calendar: [Work] Feed Call"]);
+        assert_eq!(
+            fire_due_calendar_alerts(&db, None, |t, _, _| titles.push(t.to_string()), at_lead)
+                .unwrap(),
+            0
         );
     }
 }

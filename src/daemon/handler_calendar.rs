@@ -62,6 +62,11 @@ pub(crate) static CALENDAR: ToolSpec = ToolSpec {
             required: &["id"],
             optional: &[],
         },
+        ActionSpec {
+            name: "export_ics",
+            required: &[],
+            optional: &["include_milestones"],
+        },
     ],
 };
 
@@ -77,6 +82,7 @@ resource_action_object!(
         ("create_milestone", CalendarCreateMilestoneParams),
         ("update_milestone", CalendarUpdateMilestoneParams),
         ("delete_milestone", CalendarIdParams),
+        ("export_ics", CalendarExportIcsParams),
     ]
 );
 
@@ -93,7 +99,8 @@ impl TaskTriggerHandler {
         `list_milestones` (required: none; optional: project_path, status) — list per-project milestones (`status` is planned|active|done). \
         `create_milestone` (required: project_path, title; optional: notes, due_at, status) — create a project milestone. \
         `update_milestone` (required: id; optional: title, notes, due_at, status) — update an existing milestone. \
-        `delete_milestone` (required: id; optional: none) — delete a milestone by id."
+        `delete_milestone` (required: id; optional: none) — delete a milestone by id. \
+        `export_ics` (required: none; optional: include_milestones) — export calendar events (and optionally milestones with due_at) as RFC 5545 .ics."
     )]
     pub(crate) async fn calendar(
         &self,
@@ -112,6 +119,7 @@ impl TaskTriggerHandler {
             "create_milestone" => self.calendar_create_milestone(&action_params(&params, spec)?),
             "update_milestone" => self.calendar_update_milestone(&action_params(&params, spec)?),
             "delete_milestone" => self.calendar_delete_milestone(&action_params(&params, spec)?),
+            "export_ics" => self.calendar_export_ics(&action_params(&params, spec)?),
             _ => unreachable!("validated action"),
         }
     }
@@ -246,6 +254,30 @@ impl TaskTriggerHandler {
             ))),
             Err(e) => Ok(error_result(&e.to_string())),
         }
+    }
+
+    fn calendar_export_ics(
+        &self,
+        params: &CalendarExportIcsParams,
+    ) -> Result<CallToolResult, McpError> {
+        let events = match self.db.list_calendar_events(None, None, false) {
+            Ok(events) => events,
+            Err(e) => return Ok(error_result(&e.to_string())),
+        };
+        let milestones = if params.include_milestones.unwrap_or(false) {
+            match self.db.list_calendar_milestones(None, None) {
+                Ok(ms) => ms,
+                Err(e) => return Ok(error_result(&e.to_string())),
+            }
+        } else {
+            Vec::new()
+        };
+        let ics = crate::domain::ics::export_ics(&events, &milestones);
+        json_result(&serde_json::json!({
+            "ics": ics,
+            "events": events.len(),
+            "milestones": milestones.iter().filter(|m| m.due_at.is_some()).count(),
+        }))
     }
 }
 

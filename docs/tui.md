@@ -340,6 +340,14 @@ confirmation — removing or narrowing a grant kicks the login's live guest
 peers at once. While any device is
 live the sidebar header shows `⇄ n`.
 
+In **Calendar** (`F1`, then `6`), `m` (or clicking `[Timeline]` / `[Milestones]`)
+toggles between the unified 14-day **Timeline** (`[event]`, `[ics:<feed>]`,
+`[cron]`, `[graph-at]`, `[missed]` pinned at top, and `[prompt]`) and per-project
+**Milestones**. In Timeline, `d` dismisses an event or feed item, `s` snoozes it
+for 5 minutes, `r` runs a `[missed]` one-shot `at` graph run immediately via the
+daemon, and `a` opens the inline add form. In Milestones, `Space` cycles status
+(`planned` → `active` → `done`) and `a` opens the inline add-milestone form.
+
 ### Session shelf
 
 - **Sending** — an agent delivers files to its session with the MCP tool

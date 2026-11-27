@@ -38,6 +38,7 @@ mod delivery_merge;
 pub(crate) mod held_sends;
 mod retry;
 mod schedule_math;
+pub(crate) use schedule_math::next_cron_occurrence_utc;
 pub(crate) mod scheduled_prompts;
 mod scheduled_runs;
 /// The internal cron scheduler that runs as a tokio background_agent.
@@ -82,6 +83,8 @@ pub struct CronScheduler {
     /// Seconds a due scheduled send waits for later sends to the same
     /// session so they arrive as one message (`0` disables merging).
     delivery_merge_window_s: u64,
+    /// Read-only `.ics` calendar feeds configured in `[[calendar.feeds]]`.
+    calendar_feeds: Vec<crate::domain::canopy_config::CalendarFeedConfig>,
 }
 
 /// Namespace a graph id in the shared `last_fired` map.
@@ -103,6 +106,7 @@ impl CronScheduler {
             last_fired: Arc::new(Mutex::new(std::collections::HashMap::new())),
             retry: RetryPolicy::default(),
             delivery_merge_window_s: delivery_merge::default_merge_window_s(),
+            calendar_feeds: Vec::new(),
         }
     }
 
@@ -118,6 +122,15 @@ impl CronScheduler {
     /// `[scheduler]` table, the same snapshot pattern as [`Self::with_retry`].
     pub fn with_delivery_merge_window_s(mut self, window_s: u64) -> Self {
         self.delivery_merge_window_s = window_s;
+        self
+    }
+
+    /// Attach read-only `.ics` feeds to refresh on daemon start and periodically.
+    pub fn with_calendar_feeds(
+        mut self,
+        feeds: Vec<crate::domain::canopy_config::CalendarFeedConfig>,
+    ) -> Self {
+        self.calendar_feeds = feeds;
         self
     }
 
@@ -198,6 +211,15 @@ impl CronScheduler {
                     merge_window_s,
                 )
                 .await;
+            });
+        }
+
+        if !self.calendar_feeds.is_empty() {
+            let db = Arc::clone(&self.db);
+            let feeds = self.calendar_feeds.clone();
+            let feed_cancel = self.cancel.clone();
+            tokio::spawn(async move {
+                super::ics_refresh::run_ics_refresh_loop(db, feeds, feed_cancel).await;
             });
         }
 

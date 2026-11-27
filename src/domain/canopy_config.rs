@@ -205,7 +205,13 @@ pub struct CanopyConfig {
     /// `[daemon]` settings for the daemon's own resource footprint.
     #[serde(default)]
     pub daemon: DaemonConfig,
+
+    /// `[calendar]` settings for read-only external `.ics` feeds.
+    #[serde(default)]
+    pub calendar: CalendarConfig,
 }
+
+pub use super::ics::{CalendarConfig, CalendarFeedConfig};
 
 /// Retry policy of the cron scheduler, read from the `[scheduler]` table in
 /// `config.toml`. A failed scheduled run (e.g. a CLI hitting its quota) is
@@ -776,6 +782,7 @@ impl Default for CanopyConfig {
             tui: TuiConfig::default(),
             remote: RemoteConfig::default(),
             daemon: DaemonConfig::default(),
+            calendar: CalendarConfig::default(),
         }
     }
 }
@@ -1345,5 +1352,30 @@ mod tests {
         assert_eq!(loaded.remote.github_client_id, "custom-id");
         assert_eq!(loaded.remote.host_label, "home-server");
         assert_eq!(loaded.remote.stun_fallback, "stun:custom.example:3478");
+    }
+
+    #[test]
+    fn calendar_feeds_parse_with_default_refresh_minutes() {
+        let dir = TempDir::new().unwrap();
+        let canopy_dir = dir.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+        let toml = r#"
+[[calendar.feeds]]
+name = "Work"
+source = "https://example.com/work.ics"
+
+[[calendar.feeds]]
+name = "Local"
+source = "/tmp/local.ics"
+refresh_minutes = 30
+"#;
+        std::fs::write(canopy_dir.join("config.toml"), toml).unwrap();
+
+        let loaded = CanopyConfig::load(&canopy_dir);
+        assert_eq!(loaded.calendar.feeds.len(), 2);
+        assert_eq!(loaded.calendar.feeds[0].name, "Work");
+        assert_eq!(loaded.calendar.feeds[0].refresh_minutes, 15);
+        assert_eq!(loaded.calendar.feeds[1].name, "Local");
+        assert_eq!(loaded.calendar.feeds[1].refresh_minutes, 30);
     }
 }

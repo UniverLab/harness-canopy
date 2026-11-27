@@ -115,6 +115,23 @@ impl Database {
         Ok(earliest.and_then(|ts| DateTime::from_timestamp(ts, 0)))
     }
 
+    /// List all pending (not yet fired) scheduled sends across all sessions,
+    /// ordered by fire time (soonest first).
+    pub fn list_all_pending_scheduled_prompts(&self) -> Result<Vec<ScheduledPrompt>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, prompt, target_session_id, workdir, fire_at, created_at, builder_state, provenance
+             FROM scheduled_prompts
+             ORDER BY fire_at ASC",
+        )?;
+        let rows = stmt.query_map([], Self::row_to_scheduled_prompt)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     /// List all pending (not yet fired) scheduled sends for a given session,
     /// ordered by fire time (soonest first).
     pub fn list_pending_scheduled_prompts_for_session(

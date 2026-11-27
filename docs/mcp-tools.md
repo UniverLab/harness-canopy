@@ -239,7 +239,7 @@ ensembles — a crew.
 
 | Tool | Description |
 |---|---|
-| `calendar` | Manage personal calendar events and per-project roadmap milestones. Actions: `list_events` (optional `from`, `to`, `include_dismissed` default `false`), `create_event` (`title`, `at`, optional `notes`, `recurrence` `none` (default)/`daily`/`weekly`/`monthly`, `lead_minutes` >= 0 default `10`), `update_event` (`id`, optional `title`, `notes`, `at`, `recurrence`, `lead_minutes`, `snoozed_until`, `dismissed_at`), `delete_event` (`id`), `list_milestones` (optional `project_path`, `status` `planned`/`active`/`done`), `create_milestone` (`project_path`, `title`, optional `notes`, `due_at`, `status` default `planned`), `update_milestone` (`id`, optional `title`, `notes`, `due_at`, `status`), `delete_milestone` (`id`) — timestamps are RFC 3339; pass `action` plus the params the refusal/table lists |
+| `calendar` | Manage personal calendar events and per-project roadmap milestones. Actions: `list_events` (optional `from`, `to`, `include_dismissed` default `false`), `create_event` (`title`, `at`, optional `notes`, `recurrence` `none` (default)/`daily`/`weekly`/`monthly`, `lead_minutes` >= 0 default `10`), `update_event` (`id`, optional `title`, `notes`, `at`, `recurrence`, `lead_minutes`, `snoozed_until`, `dismissed_at`), `delete_event` (`id`), `list_milestones` (optional `project_path`, `status` `planned`/`active`/`done`), `create_milestone` (`project_path`, `title`, optional `notes`, `due_at`, `status` default `planned`), `update_milestone` (`id`, optional `title`, `notes`, `due_at`, `status`), `delete_milestone` (`id`), `export_ics` (optional `include_milestones` default `false`) — timestamps are RFC 3339; pass `action` plus the params the refusal/table lists |
 
 ## Project (1)
 

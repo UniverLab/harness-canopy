@@ -61,6 +61,15 @@ pub(crate) enum CalendarAction {
         #[command(subcommand)]
         action: CalendarMilestoneAction,
     },
+    /// Export calendar events (and optionally milestones) as RFC 5545 `.ics`.
+    Export {
+        /// Write `.ics` output to this file path (defaults to stdout).
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+        /// Include milestones that have `due_at` set.
+        #[arg(long)]
+        include_milestones: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -137,6 +146,10 @@ pub(crate) async fn handle_calendar_action(
             json,
         } => handle_list_milestones(port_override, project, status, json),
         CalendarAction::Milestone { action } => handle_milestone_action(action, port_override),
+        CalendarAction::Export {
+            out,
+            include_milestones,
+        } => handle_export_ics(port_override, out, include_milestones),
     }
 }
 
@@ -244,6 +257,30 @@ fn handle_list_milestones(
         }
     }
     println!("{text}");
+    Ok(())
+}
+
+fn handle_export_ics(
+    port_override: Option<u16>,
+    out: Option<std::path::PathBuf>,
+    include_milestones: bool,
+) -> Result<()> {
+    let args = serde_json::json!({
+        "action": "export_ics",
+        "include_milestones": include_milestones,
+    });
+    let text = call_tool(port_override, "calendar", &args)?;
+    let parsed: serde_json::Value = serde_json::from_str(&text)?;
+    let ics = parsed
+        .get("ics")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Unexpected export_ics response: {text}"))?;
+    if let Some(path) = out {
+        std::fs::write(&path, ics)?;
+        println!("Exported calendar to {}", path.display());
+    } else {
+        print!("{ics}");
+    }
     Ok(())
 }
 

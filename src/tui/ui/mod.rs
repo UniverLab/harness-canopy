@@ -76,6 +76,9 @@ pub(crate) fn draw_timed(frame: &mut Frame, app: &mut App, measure: bool) -> &'s
     app.hint_tip_got_it = None;
     app.hint_tip_hide_all = None;
     app.hub.help_reset_rect = None;
+    app.hub.calendar.timeline_rect = None;
+    app.hub.calendar.milestones_rect = None;
+    app.hub.calendar.list_rect = None;
     app.toast.clear_rects();
     let full = frame.area();
     frame.render_widget(

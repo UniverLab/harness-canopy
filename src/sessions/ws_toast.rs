@@ -15,6 +15,12 @@ pub(crate) fn handle(db: &Database, frame: ClientFrame) -> String {
             let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
             match db.dismiss_calendar_event(&event_id, &now) {
                 Ok(_) => ok_frame(&req),
+                Err(err) if err.to_string().contains("not found") => {
+                    match db.dismiss_calendar_feed_item(&event_id, &now) {
+                        Ok(_) => ok_frame(&req),
+                        Err(feed_err) => toast_err(&req, &feed_err),
+                    }
+                }
                 Err(err) => toast_err(&req, &err),
             }
         }
@@ -28,6 +34,12 @@ pub(crate) fn handle(db: &Database, frame: ClientFrame) -> String {
                 (Utc::now() + Duration::minutes(mins)).to_rfc3339_opts(SecondsFormat::Secs, true);
             match db.snooze_calendar_event(&event_id, &until) {
                 Ok(_) => ok_frame(&req),
+                Err(err) if err.to_string().contains("not found") => {
+                    match db.snooze_calendar_feed_item(&event_id, &until) {
+                        Ok(_) => ok_frame(&req),
+                        Err(feed_err) => toast_err(&req, &feed_err),
+                    }
+                }
                 Err(err) => toast_err(&req, &err),
             }
         }
@@ -105,5 +117,41 @@ mod tests {
             },
         );
         assert!(missing_reply.contains(ERR_NOT_FOUND), "{missing_reply}");
+    }
+
+    #[test]
+    fn handle_dismiss_and_snooze_supports_feed_items() {
+        use crate::domain::ics::parse_ics;
+
+        let (_dir, db) = temp_db();
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:u1\r\nSUMMARY:Feed Sync\r\nDTSTART:20261127T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        db.upsert_calendar_feed_items("Work", &parse_ics(ics))
+            .unwrap();
+
+        let snooze_reply = handle(
+            &db,
+            ClientFrame::ToastSnooze {
+                req: "r1".to_string(),
+                event_id: "Work:u1".to_string(),
+                minutes: Some(5),
+            },
+        );
+        assert!(snooze_reply.contains(r#""t":"ok""#), "{snooze_reply}");
+        let items = db.list_calendar_feed_items(Some("Work"), false).unwrap();
+        assert_eq!(items.len(), 1);
+        assert!(items[0].snoozed_until.is_some());
+
+        let dismiss_reply = handle(
+            &db,
+            ClientFrame::ToastDismiss {
+                req: "r2".to_string(),
+                event_id: "Work:u1".to_string(),
+            },
+        );
+        assert!(dismiss_reply.contains(r#""t":"ok""#), "{dismiss_reply}");
+        assert!(db
+            .list_calendar_feed_items(Some("Work"), false)
+            .unwrap()
+            .is_empty());
     }
 }

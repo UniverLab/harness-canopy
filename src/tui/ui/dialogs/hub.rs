@@ -8,10 +8,11 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::{
-    centered_rect, draw_dialog_left_wave, hub_help, hub_keys, hub_legend, hub_remote, hub_settings,
-    hub_shelf,
+    centered_rect, draw_dialog_left_wave, hub_calendar, hub_help, hub_keys, hub_legend, hub_remote,
+    hub_settings, hub_shelf,
 };
 use crate::tui::app::hub::{HubTab, HUB_TABS};
+use crate::tui::app::hub_calendar::CalendarSubView;
 use crate::tui::app::hub_settings::SettingsFocus;
 use crate::tui::app::types::App;
 use crate::tui::ui::effective_animation_tick;
@@ -93,6 +94,7 @@ fn draw_body(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         HubTab::Missions => hub_legend::draw_missions_tab(frame, app, theme, area),
         HubTab::Shelf => hub_shelf::draw_shelf_tab(frame, app, theme, area),
         HubTab::Remote => hub_remote::draw_remote_tab(frame, app, theme, area),
+        HubTab::Calendar => hub_calendar::draw_calendar_tab(frame, app, theme, area),
         HubTab::Help => hub_help::draw_help_tab(frame, app, theme, area),
     }
 }
@@ -118,6 +120,14 @@ fn footer_hint(app: &App) -> &'static str {
         HubTab::Missions => "↑↓ mission · Shift+←→ tab · Esc close",
         HubTab::Shelf => "Enter open   d delete   c copy path",
         HubTab::Remote => "↑↓ move · Enter select · d disconnect · r revoke · t trust · Esc close",
+        HubTab::Calendar => match app.hub.calendar.sub_view {
+            CalendarSubView::Timeline => {
+                "↑↓ select · m milestones · d dismiss · s snooze 5m · r run missed · a add · Esc close"
+            }
+            CalendarSubView::Milestones => {
+                "↑↓ select · m timeline · Space status · a add · Esc close"
+            }
+        },
         HubTab::Help => "r reset hints · Shift+←→ tab · Esc close",
     }
 }

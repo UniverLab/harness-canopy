@@ -168,6 +168,11 @@ fn start_background_tasks(inputs: &BackgroundTaskInputs<'_>) -> HttpBackgroundTa
             crate::domain::canopy_config::CanopyConfig::load(inputs.data_dir)
                 .scheduler
                 .delivery_merge_window_s,
+        )
+        .with_calendar_feeds(
+            crate::domain::canopy_config::CanopyConfig::load(inputs.data_dir)
+                .calendar
+                .feeds,
         ),
     );
     let scheduler_notify = cron_scheduler.notifier();
@@ -630,7 +635,8 @@ async fn stdio_server_startup(db: Arc<Database>, data_dir: &std::path::Path) -> 
         .with_retry(crate::scheduler::cron_scheduler::RetryPolicy::from_config(
             &canopy_config.scheduler,
         ))
-        .with_delivery_merge_window_s(canopy_config.scheduler.delivery_merge_window_s),
+        .with_delivery_merge_window_s(canopy_config.scheduler.delivery_merge_window_s)
+        .with_calendar_feeds(canopy_config.calendar.feeds.clone()),
     );
     let scheduler_notify = cron_scheduler.notifier();
     let scheduler_cancel = Arc::clone(&cron_scheduler).start();

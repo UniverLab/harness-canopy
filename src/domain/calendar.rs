@@ -110,6 +110,24 @@ pub struct CalendarEvent {
     pub updated_at: String,
 }
 
+/// A cached entry from a read-only external `.ics` feed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CalendarFeedItem {
+    pub id: String,
+    pub feed_name: String,
+    pub uid: String,
+    pub title: String,
+    pub notes: Option<String>,
+    /// RFC 3339 UTC timestamp of the event's anchor occurrence.
+    pub at: String,
+    pub recurrence: Recurrence,
+    pub lead_minutes: i64,
+    pub snoozed_until: Option<String>,
+    pub dismissed_at: Option<String>,
+    pub last_notified_at: Option<String>,
+    pub updated_at: String,
+}
+
 /// A per-project internal roadmap milestone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CalendarMilestone {

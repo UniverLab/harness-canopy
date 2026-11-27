@@ -224,6 +224,7 @@ mod graph_editor;
 mod graph_form;
 mod handler_errors;
 mod hub;
+mod hub_calendar;
 mod version_notice;
 
 use handler_errors::{report_handler_error, route_error, ErrorRoute, ErrorSource};

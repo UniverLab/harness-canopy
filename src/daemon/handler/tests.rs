@@ -129,12 +129,14 @@ const EXPECTED_TOOL_NAMES: &[&str] = &[
 /// description hash changed; the schema hash moved with the new actions). The
 /// `crew` and `graph` rows were re-pinned when `crew assignments` gained the
 /// optional `unbound` param (field doc + description changed) and `graph audit`
-/// documented `unbound_to_crew`/`unbound_to_crew_total`.
+/// documented `unbound_to_crew`/`unbound_to_crew_total`. The `calendar` row was
+/// re-pinned when it gained the `export_ics` action and `include_milestones`
+/// parameter.
 const EXPECTED_TOOL_ROWS: &[&str] = &[
     "agent|d8f9c6d2e27d78721e0e68301793b430eb079a49d68e003c0a36062ade4326c2|d713589e444e00e203c10fb39b668774212540a62cec84a04d9f2b34b7c386b1",
     "agent_edit|9f9d97739be8934e8023b86d6ed35d9acf9209d18d42a8cafd8ffc99154965cf|eb0e7e1757828c2db9669176f36f437dc1cfc1797eacee875d69ff61ae80b271",
     "agent_report|998eb6d649fe53809656f0a4db81248aa0feb0b045f957686d917fbcfe289224|f40f986d373435cf862cf0e260812d92f78eaf4bfcfbe98ffce5d724a1685d54",
-    "calendar|03c3059be1f3febbf34013411632bfed231932bd5060340d6fff99e59c474e3b|c540ca107608e6e58a28cb7c29b1011f774ca66e70abfdf4ca059a78951dfb8f",
+    "calendar|267254ac76076a261ae214e394315b3c5396f84b017234febcd3771b2ba22906|de80bfe05abf041682940b5d0c609ebdc686aa2cdb1d314a3d640d3090ef9d2e",
     "catalogue|5084e83660b0e00c3592158b31c8407706d10cbd8a3387e08c927a7536f98712|54b0d07012084989914328de42d7bddc35ad16ebe2f14dec04aecbdaa7292a51",
     "config|eb46212a6d527f698017c0360b099c7ae3d4b01e690fcd3c879ab8764368ee63|9c61b49e03def9786bddde303a06fa926bc59590ec475298d0422eb795af9d4b",
     "crew|01a8579df826466b55780c0f6956ffd1b28ebb68e1fbac021b3ecd38eeb423e5|24c95088ae50b8bc458bb9e24ef4565e192bf9bdf32a0b2a4606e74bcbc8db94",

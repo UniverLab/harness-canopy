@@ -612,6 +612,15 @@ pub static REGISTRY: &[SettingDef] = &[
         apply: Apply::Hot,
         wizard: false,
     },
+    SettingDef {
+        key: "calendar.feeds",
+        kind: Kind::Structured,
+        default: DefaultValue::Literal("[]"),
+        group: Group::General,
+        description: "Read-only external .ics calendar feeds ([[calendar.feeds]]).",
+        apply: Apply::RestartDaemon,
+        wizard: false,
+    },
 ];
 
 #[cfg(test)]
@@ -621,7 +630,7 @@ mod tests {
 
     #[test]
     fn registry_has_one_entry_per_setting_and_they_are_unique() {
-        assert_eq!(REGISTRY.len(), 63);
+        assert_eq!(REGISTRY.len(), 64);
         for def in REGISTRY {
             assert_eq!(find(def.key).map(|d| d.key), Some(def.key));
         }

@@ -12,6 +12,7 @@ pub mod graph_control;
 pub mod graph_editor;
 pub mod graph_form;
 pub mod hub;
+pub mod hub_calendar;
 pub mod hub_help;
 pub mod hub_keys;
 pub mod hub_legend;

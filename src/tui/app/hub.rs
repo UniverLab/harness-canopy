@@ -4,7 +4,7 @@
 
 use super::types::App;
 
-/// The six hub tabs, in the order the tab bar shows them.
+/// The seven hub tabs, in the order the tab bar shows them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum HubTab {
     #[default]
@@ -13,15 +13,17 @@ pub(crate) enum HubTab {
     Missions,
     Shelf,
     Remote,
+    Calendar,
     Help,
 }
 
-pub(crate) const HUB_TABS: [HubTab; 6] = [
+pub(crate) const HUB_TABS: [HubTab; 7] = [
     HubTab::Settings,
     HubTab::Keys,
     HubTab::Missions,
     HubTab::Shelf,
     HubTab::Remote,
+    HubTab::Calendar,
     HubTab::Help,
 ];
 
@@ -33,11 +35,12 @@ impl HubTab {
             HubTab::Missions => "Missions & stats",
             HubTab::Shelf => "Shelf",
             HubTab::Remote => "Remote",
+            HubTab::Calendar => "Calendar",
             HubTab::Help => "Help",
         }
     }
 
-    /// The `1`/`2`/`3`/`4`/`5`/`6` shortcut for a tab, or `None`.
+    /// The `1`..`7` shortcut for a tab, or `None`.
     pub(crate) fn from_digit(c: char) -> Option<HubTab> {
         match c {
             '1' => Some(HubTab::Settings),
@@ -45,7 +48,8 @@ impl HubTab {
             '3' => Some(HubTab::Missions),
             '4' => Some(HubTab::Shelf),
             '5' => Some(HubTab::Remote),
-            '6' => Some(HubTab::Help),
+            '6' => Some(HubTab::Calendar),
+            '7' => Some(HubTab::Help),
             _ => None,
         }
     }
@@ -76,6 +80,8 @@ pub(crate) struct HubState {
     pub shelf: super::hub_shelf::ShelfState,
     /// The Remote tab's cached status view, cursor and flows.
     pub remote: super::hub_remote::RemoteState,
+    /// The Calendar tab's unified timeline, milestones, and inline add form.
+    pub calendar: super::hub_calendar::HubCalendarState,
     /// Last-rendered row of the Help tab's "Reset hints" action, for
     /// click hit-testing. Cleared at the start of every frame.
     pub help_reset_rect: Option<ratatui::layout::Rect>,
@@ -91,6 +97,8 @@ impl App {
             self.refresh_shelf();
         } else if self.hub.tab == HubTab::Remote {
             self.remote_request_refresh();
+        } else if self.hub.tab == HubTab::Calendar {
+            self.refresh_calendar();
         } else {
             self.hub.settings.request_refresh();
         }
@@ -109,7 +117,7 @@ impl App {
     }
 
     /// Switch to `tab`, fetching what that tab shows: the Settings rows,
-    /// the shelf listings, or the remote status.
+    /// the shelf listings, the remote status, or the calendar timeline.
     pub(crate) fn set_hub_tab(&mut self, tab: HubTab) {
         self.hub.tab = tab;
         if tab == HubTab::Settings {
@@ -120,6 +128,9 @@ impl App {
         }
         if tab == HubTab::Remote {
             self.remote_request_refresh();
+        }
+        if tab == HubTab::Calendar {
+            self.refresh_calendar();
         }
     }
 
@@ -147,14 +158,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hub_tab_digits_map_to_the_six_tabs() {
+    fn hub_tab_digits_map_to_the_seven_tabs() {
         assert_eq!(HubTab::from_digit('1'), Some(HubTab::Settings));
         assert_eq!(HubTab::from_digit('2'), Some(HubTab::Keys));
         assert_eq!(HubTab::from_digit('3'), Some(HubTab::Missions));
         assert_eq!(HubTab::from_digit('4'), Some(HubTab::Shelf));
         assert_eq!(HubTab::from_digit('5'), Some(HubTab::Remote));
-        assert_eq!(HubTab::from_digit('6'), Some(HubTab::Help));
-        assert_eq!(HubTab::from_digit('7'), None);
+        assert_eq!(HubTab::from_digit('6'), Some(HubTab::Calendar));
+        assert_eq!(HubTab::from_digit('7'), Some(HubTab::Help));
+        assert_eq!(HubTab::from_digit('8'), None);
     }
 
     #[test]
@@ -163,10 +175,12 @@ mod tests {
         assert_eq!(HubTab::Keys.next(true), HubTab::Missions);
         assert_eq!(HubTab::Missions.next(true), HubTab::Shelf);
         assert_eq!(HubTab::Shelf.next(true), HubTab::Remote);
-        assert_eq!(HubTab::Remote.next(true), HubTab::Help);
+        assert_eq!(HubTab::Remote.next(true), HubTab::Calendar);
+        assert_eq!(HubTab::Calendar.next(true), HubTab::Help);
         assert_eq!(HubTab::Help.next(true), HubTab::Settings);
         assert_eq!(HubTab::Settings.next(false), HubTab::Help);
-        assert_eq!(HubTab::Help.next(false), HubTab::Remote);
+        assert_eq!(HubTab::Help.next(false), HubTab::Calendar);
+        assert_eq!(HubTab::Calendar.next(false), HubTab::Remote);
         assert_eq!(HubTab::Remote.next(false), HubTab::Shelf);
         assert_eq!(HubTab::Shelf.next(false), HubTab::Missions);
     }
