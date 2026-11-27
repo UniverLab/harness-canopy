@@ -691,6 +691,7 @@ impl Database {
         Self::migrate_spec_commit_evidence_columns(&conn)?;
         Self::migrate_spec_cross_run_attempts_column(&conn)?;
         Self::migrate_spec_type_columns(&conn)?;
+        Self::migrate_strip_repeated_spec_prefix(&conn)?;
         Self::migrate_intelligence_touch_columns(&conn)?;
         Self::migrate_ensemble_execution_columns(&conn)?;
         Self::migrate_graph_run_output_tails(&conn)?;
@@ -766,6 +767,7 @@ pub mod session_finish;
 pub mod session_target;
 pub mod shelf;
 mod spec_intent_migration;
+mod spec_name_repair;
 mod spec_review_drains;
 pub mod state;
 mod subagent_runs;

@@ -81,15 +81,8 @@ async fn corrupt_subject_fails_commit_node_and_commits_nothing() {
     let spec_id = commit_guard_spec(&db, &graph_id, "clean subject");
     let before = git_head(dir.path());
 
-    let execution = corrupting_guard_run(
-        &engine,
-        &db,
-        &graph_id,
-        &spec_id,
-        "fix(tui): fix(tui): open F1",
-        true,
-    )
-    .await;
+    let execution =
+        corrupting_guard_run(&engine, &db, &graph_id, &spec_id, "fix(tui): ", true).await;
     assert_eq!(execution.status, GraphRunStatus::Fail);
     assert_eq!(
         execution.output.get("failure_kind").and_then(Value::as_str),
@@ -116,15 +109,8 @@ async fn corrupt_subject_fails_message_consuming_check_without_rights() {
     let spec_id = commit_guard_spec(&db, &graph_id, "clean subject");
     let before = git_head(dir.path());
 
-    let execution = corrupting_guard_run(
-        &engine,
-        &db,
-        &graph_id,
-        &spec_id,
-        "fix(tui): fix(tui): open F1",
-        false,
-    )
-    .await;
+    let execution =
+        corrupting_guard_run(&engine, &db, &graph_id, &spec_id, "fix(tui): ", false).await;
     assert_eq!(execution.status, GraphRunStatus::Fail);
     assert_eq!(
         execution.output.get("failure_kind").and_then(Value::as_str),
@@ -210,7 +196,7 @@ async fn corrupt_subject_fails_committing_agent_before_spawn() {
 
     let mut spec = standalone_spec("spec-agent-guard", 1);
     spec.graph_id = Some(graph_id.clone());
-    spec.name = "fix(tui): fix(tui): open F1".to_string();
+    spec.name = "fix(tui): ".to_string();
     spec.spec_type = Some(SpecType::Fix);
     spec.spec_scope = Some("tui".to_string());
     db.insert_graph_spec(&spec).unwrap();
@@ -380,7 +366,7 @@ async fn corrupt_subject_fails_committing_ensemble_member() {
     let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
     let mut spec = standalone_spec("spec-member-guard", 1);
     spec.graph_id = Some(graph_id.clone());
-    spec.name = "fix(tui): fix(tui): open F1".to_string();
+    spec.name = "fix(tui): ".to_string();
     spec.spec_type = Some(SpecType::Fix);
     spec.spec_scope = Some("tui".to_string());
     db.insert_graph_spec(&spec).unwrap();
@@ -438,7 +424,7 @@ async fn corrupt_subject_fails_member_with_own_commit_rights() {
     let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
     let mut spec = standalone_spec("spec-member-own-rights", 1);
     spec.graph_id = Some(graph_id.clone());
-    spec.name = "fix(tui): fix(tui): open F1".to_string();
+    spec.name = "fix(tui): ".to_string();
     spec.spec_type = Some(SpecType::Fix);
     spec.spec_scope = Some("tui".to_string());
     db.insert_graph_spec(&spec).unwrap();
@@ -520,5 +506,75 @@ fn guard_execution_shape_names_message_and_rule() {
             == Some(true),
         "deterministic so infra retries settle: {}",
         execution.output
+    );
+}
+
+#[test]
+fn agent_commit_guard_allows_stored_doubled_prefix() {
+    let mut spec = standalone_spec("spec-guard-normalized", 1);
+    spec.name = "fix(tui): fix(tui): open a session".to_string();
+    spec.spec_type = Some(SpecType::Fix);
+    spec.spec_scope = Some("tui".to_string());
+    let node = GraphNode {
+        id: "n".to_string(),
+        spec_id: None,
+        graph_id: None,
+        name: "committer".to_string(),
+        kind: GraphNodeKind::Agent,
+        config: serde_json::json!({ "commit_rights": true }),
+        position: 1,
+        created_at: chrono::Utc::now(),
+    };
+    assert!(
+        crate::graph_engine::commit_guard::agent_commit_guard(&spec, &node, true).is_none(),
+        "commit_message normalizes stacked prefixes so the guard passes"
+    );
+}
+
+#[tokio::test]
+async fn check_node_renders_single_prefix_for_stored_doubled_name() {
+    let (dir, db, _engine, graph_id) = bare_graph_fixture().unwrap();
+    let mut spec = standalone_spec("spec-check-normalized", 1);
+    spec.graph_id = Some(graph_id.clone());
+    spec.name = "fix(tui): fix(tui): open a session".to_string();
+    spec.spec_type = Some(SpecType::Fix);
+    spec.spec_scope = Some("tui".to_string());
+    db.insert_graph_spec(&spec).unwrap();
+    let node = GraphNode {
+        id: "check-render".to_string(),
+        spec_id: None,
+        graph_id: Some(graph_id.clone()),
+        name: "render".to_string(),
+        kind: GraphNodeKind::Check,
+        config: serde_json::json!({
+            "command": "printf '%s' {{spec_commit_message}}",
+            "success_condition": "exit_code_0",
+        }),
+        position: 1,
+        created_at: chrono::Utc::now(),
+    };
+    db.insert_graph_node(&node).unwrap();
+    let lp = db.get_graph(&graph_id).unwrap().unwrap();
+    let execution = execute_check_node(
+        &db,
+        "run-check-norm",
+        &lp,
+        &spec,
+        &node,
+        None,
+        None,
+        dir.path().to_str().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        execution.status,
+        GraphRunStatus::Pass,
+        "{}",
+        execution.output
+    );
+    assert_eq!(
+        execution.output.get("stdout").and_then(Value::as_str),
+        Some("fix(tui): open a session")
     );
 }

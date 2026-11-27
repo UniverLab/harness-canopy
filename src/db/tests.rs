@@ -433,3 +433,4 @@ mod part07_tests;
 mod part08_tests;
 mod snapshot_query_tests;
 mod spec_intent_tests;
+mod spec_name_repair_tests;

@@ -2,8 +2,9 @@
 //! and spec naming resolution.
 
 use crate::domain::spec_type::{
-    check_message, check_subject, commit_message, has_header_prefix, parse_conventional_title,
-    resolve_spec_naming, strip_header, ConventionalTitle, SpecNaming, SpecType,
+    check_message, check_subject, commit_message, commit_message_opt, has_header_prefix,
+    parse_conventional_title, resolve_spec_naming, strip_header, ConventionalTitle, SpecNaming,
+    SpecType,
 };
 
 #[test]
@@ -94,6 +95,38 @@ fn test_commit_message_without_scope() {
 fn test_commit_message_empty_scope() {
     let msg = commit_message(SpecType::Docs, Some(""), "update readme");
     assert_eq!(msg, "docs: update readme");
+}
+
+#[test]
+fn commit_message_strips_stacked_and_matching_headers() {
+    assert_eq!(
+        commit_message(
+            SpecType::Feat,
+            Some("build"),
+            "feat(build): keep the compile log"
+        ),
+        "feat(build): keep the compile log"
+    );
+    assert_eq!(
+        commit_message(SpecType::Feat, Some("build"), "feat(a): fix(b): x"),
+        "feat(build): x"
+    );
+    assert_eq!(
+        commit_message(SpecType::Fix, Some("tui"), "feat(api): open F1"),
+        "fix(tui): open F1"
+    );
+    assert_eq!(
+        commit_message(SpecType::Feat, None, "feat(a): x"),
+        "feat: x"
+    );
+    assert_eq!(
+        commit_message(SpecType::Fix, Some("tui"), "fix(tui): "),
+        "fix(tui): fix(tui): "
+    );
+    assert_eq!(
+        commit_message_opt(None, Some("tui"), "fix(tui): open F1"),
+        None
+    );
 }
 
 #[test]

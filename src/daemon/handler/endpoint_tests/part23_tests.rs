@@ -784,3 +784,69 @@ fn graph_spec_surfaces_attribute_creator_session() {
         Some("sess-other")
     );
 }
+
+#[test]
+fn create_and_update_refuse_doubled_title_split_single_and_spec_get_normalizes() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let workdir = dir.path().to_string_lossy().to_string();
+
+    // `create` refuses a doubled title naming "repeated prefix" and the corrected subject.
+    let created_err = run(call_resource_action(
+        &handler,
+        "spec_edit",
+        "create",
+        params_id(SpecCreateParams {
+            intent: None,
+            name: "fix(tui): fix(tui): open F1".to_string(),
+            description: valid_spec_description(),
+            workdir: Some(workdir.clone()),
+            spec_type: None,
+            spec_scope: None,
+        }),
+    ))
+    .unwrap();
+    assert_repeated_prefix(&created_err);
+    assert!(
+        text(&created_err).contains("open F1"),
+        "{}",
+        text(&created_err)
+    );
+
+    // `create` splits a single-header title and stores the bare subject.
+    let spec_id = typed_create(&handler, &db, "fix(tui): open F1", Some(&workdir), None);
+    let stored = db.get_graph_spec(&spec_id).unwrap().unwrap();
+    assert_eq!(stored.name, "open F1");
+    assert_eq!(stored.spec_type, Some(SpecType::Fix));
+    assert_eq!(stored.spec_scope.as_deref(), Some("tui"));
+
+    // `update` refuses a doubled title naming "repeated prefix" and the corrected subject.
+    let updated_err = update_name(&handler, &spec_id, "fix(tui): fix(tui): open F1").unwrap();
+    assert_repeated_prefix(&updated_err);
+    assert!(
+        text(&updated_err).contains("open F1"),
+        "{}",
+        text(&updated_err)
+    );
+
+    // A pre-existing doubled name in DB still renders a single-prefix commit_message via `spec get`.
+    let mut legacy = stored;
+    legacy.id = "legacy-doubled".to_string();
+    legacy.name = "fix(tui): fix(tui): open a session".to_string();
+    db.insert_graph_spec(&legacy).unwrap();
+
+    let fetched = run(call_resource_action(
+        &handler,
+        "spec",
+        "get",
+        serde_json::json!({ "spec_id": "legacy-doubled" }),
+    ))
+    .unwrap();
+    assert!(!is_err(&fetched), "{}", text(&fetched));
+    let parsed: serde_json::Value = serde_json::from_str(&raw_text(&fetched)).unwrap();
+    assert_eq!(
+        parsed
+            .get("commit_message")
+            .and_then(serde_json::Value::as_str),
+        Some("fix(tui): open a session")
+    );
+}

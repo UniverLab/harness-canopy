@@ -105,8 +105,9 @@ static COMMIT_MESSAGE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Strip stacked conventional headers from the front of `subject`: each pass
-/// removes one `<type>(<scope>)?!?: ` prefix. Used only to compute the
-/// corrected subject a refusal message shows — never to silently accept.
+/// removes one `<type>(<scope>)?!?: ` prefix. Used by `check_subject` to
+/// compute the corrected subject a refusal message shows, by `commit_message`
+/// to normalize pre-existing stored names, and by the one-time DB repair.
 pub fn strip_header(subject: &str) -> String {
     let mut rest = subject;
     while let Some(header) = HEADER_PREFIX.find(rest) {
@@ -208,11 +209,17 @@ pub fn parse_conventional_title(name: &str) -> Option<ConventionalTitle> {
 /// `<type>(<scope>): <name>` or `<type>: <name>` without a scope. Built from
 /// the stored fields — never from the code, which never appears in commits.
 pub fn commit_message(spec_type: SpecType, scope: Option<&str>, subject: &str) -> String {
+    let stripped = strip_header(subject);
+    let clean = if stripped.is_empty() {
+        subject
+    } else {
+        stripped.as_str()
+    };
     match scope {
         Some(scope) if !scope.is_empty() => {
-            format!("{}({}): {}", spec_type.as_str(), scope, subject)
+            format!("{}({}): {}", spec_type.as_str(), scope, clean)
         }
-        _ => format!("{}: {}", spec_type.as_str(), subject),
+        _ => format!("{}: {}", spec_type.as_str(), clean),
     }
 }
 
