@@ -209,7 +209,14 @@ available.
 Editing a crew reaches every bound ensemble at its next dispatch: the engine
 re-syncs a bound ensemble's members just before it dispatches (never while a
 member is in flight), and `crew` `update` also syncs every bound ensemble whose
-graph is not `running`/`pausing` immediately. A node or hook names a crew in
+graph is not `running`/`pausing` immediately. The `update` reply's `sync`
+array names every bound ensemble: one whose graph is still `running` or
+`pausing` comes back as `DeferredRunningGraph` with the note
+`"applies at next dispatch"` instead of being skipped silently, and
+`crew` `assignments` (and `canopy graph crew`) shows the lag — a row naming a
+crew carries `crew_version_current` next to the applied `crew_version_applied`,
+and an ensemble-member row whose applied version is behind also carries
+`crew_pending` (`"applies at next dispatch"`). A node or hook names a crew in
 its config (`{"crew": "name"}`) instead of `platform`; `crew` `delete` is
 refused while anything still binds the crew and the error lists every
 binding.
