@@ -87,6 +87,9 @@ pub(crate) fn handle_panel_mouse(app: &mut App, mouse: &MouseEvent) -> bool {
 }
 
 pub(super) fn handle_mouse(app: &mut App, mouse: MouseEvent) -> Result<()> {
+    if crate::tui::toast::handle_toast_mouse(app, &mouse) {
+        return Ok(());
+    }
     // The prompt builder is a modal overlay: it owns the mouse while open.
     // Left-clicks on the tab bar switch the active tab; everything else is
     // swallowed so it doesn't leak to the panel/PTY underneath.

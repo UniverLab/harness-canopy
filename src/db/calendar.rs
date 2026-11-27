@@ -8,8 +8,8 @@ use uuid::Uuid;
 
 use crate::db::Database;
 use crate::domain::calendar::{
-    parse_rfc3339_utc, validate_lead_minutes, CalendarEvent, CalendarMilestone, MilestoneStatus,
-    Recurrence,
+    next_occurrence, parse_rfc3339_utc, validate_lead_minutes, CalendarEvent, CalendarMilestone,
+    MilestoneStatus, Recurrence,
 };
 
 /// Schema for `calendar_events`, `calendar_milestones`, and their indexes.
@@ -101,6 +101,13 @@ fn row_to_event(row: &Row<'_>) -> rusqlite::Result<CalendarEvent> {
         created_at: row.get(9)?,
         updated_at: row.get(10)?,
     })
+}
+
+fn select_calendar_event_by_id(conn: &Connection, id: &str) -> Result<CalendarEvent> {
+    let select_sql = format!("SELECT {EVENT_COLUMNS} FROM calendar_events WHERE id = ?1");
+    conn.query_row(&select_sql, [id], row_to_event)
+        .optional()?
+        .ok_or_else(|| anyhow!("Calendar event '{id}' not found"))
 }
 
 fn row_to_milestone(row: &Row<'_>) -> rusqlite::Result<CalendarMilestone> {
@@ -248,11 +255,7 @@ impl Database {
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {e}"))?;
-        let select_sql = format!("SELECT {EVENT_COLUMNS} FROM calendar_events WHERE id = ?1");
-        let mut event = conn
-            .query_row(&select_sql, [id], row_to_event)
-            .optional()?
-            .ok_or_else(|| anyhow!("Calendar event '{id}' not found"))?;
+        let mut event = select_calendar_event_by_id(&conn, id)?;
 
         if let Some(t) = new_title {
             event.title = t;
@@ -306,6 +309,92 @@ impl Database {
             .map_err(|e| anyhow!("Lock poisoned: {e}"))?;
         let affected = conn.execute("DELETE FROM calendar_events WHERE id = ?1", [id])?;
         Ok(affected > 0)
+    }
+
+    /// Record that a calendar event fired a notification at `now`.
+    pub fn record_calendar_event_notified(&self, id: &str, now: &str) -> Result<CalendarEvent> {
+        let id = require_non_empty(id, "id")?;
+        let now_norm = normalize_timestamp(now)?;
+        let updated_at = now_rfc3339();
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {e}"))?;
+        let affected = conn.execute(
+            "UPDATE calendar_events
+             SET last_notified_at = ?2, updated_at = ?3
+             WHERE id = ?1",
+            params![id, now_norm, updated_at],
+        )?;
+        if affected == 0 {
+            return Err(anyhow!("Calendar event '{id}' not found"));
+        }
+        select_calendar_event_by_id(&conn, id)
+    }
+
+    /// Snooze a calendar event until `until` (clears `dismissed_at`).
+    pub fn snooze_calendar_event(&self, id: &str, until: &str) -> Result<CalendarEvent> {
+        let id = require_non_empty(id, "id")?;
+        let until_norm = normalize_timestamp(until)?;
+        let updated_at = now_rfc3339();
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {e}"))?;
+        let affected = conn.execute(
+            "UPDATE calendar_events
+             SET snoozed_until = ?2, dismissed_at = NULL, updated_at = ?3
+             WHERE id = ?1",
+            params![id, until_norm, updated_at],
+        )?;
+        if affected == 0 {
+            return Err(anyhow!("Calendar event '{id}' not found"));
+        }
+        select_calendar_event_by_id(&conn, id)
+    }
+
+    /// Dismiss a calendar event at `now`.
+    ///
+    /// Non-recurring events are marked `dismissed_at = now`. Recurring events
+    /// advance `at` to `next_occurrence(..., now)` and clear `snoozed_until`,
+    /// `last_notified_at`, and `dismissed_at`.
+    pub fn dismiss_calendar_event(&self, id: &str, now: &str) -> Result<CalendarEvent> {
+        let id = require_non_empty(id, "id")?;
+        let now_dt = parse_rfc3339_utc(now)?;
+        let now_norm = now_dt.to_rfc3339_opts(SecondsFormat::Secs, true);
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {e}"))?;
+        let mut event = select_calendar_event_by_id(&conn, id)?;
+        if event.recurrence == Recurrence::None {
+            event.dismissed_at = Some(now_norm);
+        } else {
+            let at_dt = parse_rfc3339_utc(&event.at)?;
+            if let Some(next_at) = next_occurrence(at_dt, event.recurrence, now_dt) {
+                event.at = next_at.to_rfc3339_opts(SecondsFormat::Secs, true);
+                event.snoozed_until = None;
+                event.last_notified_at = None;
+                event.dismissed_at = None;
+            } else {
+                event.dismissed_at = Some(now_norm);
+            }
+        }
+        event.updated_at = now_rfc3339();
+        conn.execute(
+            "UPDATE calendar_events
+             SET at = ?2, snoozed_until = ?3, dismissed_at = ?4, last_notified_at = ?5, updated_at = ?6
+             WHERE id = ?1",
+            params![
+                event.id,
+                event.at,
+                event.snoozed_until,
+                event.dismissed_at,
+                event.last_notified_at,
+                event.updated_at,
+            ],
+        )?;
+        Ok(event)
     }
 
     /// List milestones optionally filtered by `project_path` and `status`.

@@ -3,7 +3,7 @@
 //! lifecycle, shelf arrivals/removals) can grow without pushing `hub.rs`
 //! over the file-size cap.
 
-use super::protocol::{SessionItem, ShelfItem};
+use super::protocol::{SessionItem, ShelfItem, ToastNotification};
 
 /// Hub lifecycle event, broadcast to every connection. `Exited` from a
 /// natural child exit goes to attached connections only (`to_all: false`);
@@ -39,4 +39,6 @@ pub enum HubEvent {
     ShelfRemoved {
         file_id: String,
     },
+    /// Calendar reminder toast, broadcast to every connected TUI.
+    Toast(ToastNotification),
 }

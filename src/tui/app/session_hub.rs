@@ -49,6 +49,13 @@ impl Default for SessionHubState {
 }
 
 impl SessionHubState {
+    /// Send a raw protocol frame over the hub control connection if live.
+    pub(crate) fn send_frame(&self, frame: String) {
+        if let Some(client) = &self.client {
+            client.send(frame);
+        }
+    }
+
     /// True while the control connection is up. The slow tick reads daemon
     /// liveness from this instead of probing a TCP port every second.
     pub(crate) fn is_live(&self) -> bool {
@@ -213,6 +220,7 @@ impl App {
             HostFrame::SizeReleased { id } => self.note_remote_size_released(&id),
             HostFrame::ShelfAdded { item } => self.note_shelf_added(*item),
             HostFrame::ShelfRemoved { file_id } => self.note_shelf_removed(&file_id),
+            HostFrame::Toast(toast) => self.toast.push(toast),
             HostFrame::Shelf { .. } | HostFrame::File { .. } | HostFrame::Unknown => {}
             HostFrame::Error {
                 req: None,

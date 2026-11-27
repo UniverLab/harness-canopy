@@ -249,6 +249,11 @@ pub fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Resu
     if app.version_notice.is_some() {
         return version_notice::handle_version_notice_key(app, code);
     }
+    // Global Alt+D / Alt+S toast shortcuts work over every view (including
+    // Agent PTY and Hub) without stealing focus.
+    if crate::tui::toast::handle_toast_global_key(app, code, modifiers) {
+        return Ok(());
+    }
     // CT30: while the panel is focused on the Crews face (or one of its
     // dialogs is open) the key belongs to the face first; it reports
     // whether it consumed the key so global keys still work otherwise.
@@ -265,7 +270,10 @@ pub fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Resu
     if tip_first && crate::tui::hints::handle_tip_key(app, code, modifiers) {
         return Ok(());
     }
-    if hub::handle_hub_key(app, code, modifiers) || handle_global_key(app, code, modifiers) {
+    if hub::handle_hub_key(app, code, modifiers)
+        || crate::tui::toast::handle_toast_plain_key(app, code, modifiers)
+        || handle_global_key(app, code, modifiers)
+    {
         return Ok(());
     }
 

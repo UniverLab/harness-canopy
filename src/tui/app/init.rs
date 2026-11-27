@@ -112,6 +112,7 @@ macro_rules! app_new_fields {
             hub_open: false,
             hint_tip_open: None,
             hint_marker: None,
+            toast: crate::tui::toast::ToastQueue::default(),
             hint_tip_got_it: None,
             hint_tip_hide_all: None,
             legend_selected: 0,

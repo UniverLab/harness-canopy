@@ -34,7 +34,7 @@ pub use protocol_frames::{
     sessions_frame, shelf_added_frame, shelf_delete_frame, shelf_frame, shelf_get_frame,
     shelf_list_frame, shelf_missing_frame, shelf_removed_frame, size_released_frame,
     snapshot_frame, snapshot_more_frame, spawn_frame, spawn_frame_full, spawned_frame,
-    SpawnFrameArgs,
+    toast_dismiss_frame, toast_frame, toast_snooze_frame, SpawnFrameArgs,
 };
 #[cfg(test)]
 pub use protocol_frames::{resumable_list_frame, session_resume_frame, OWNER_FEATURES};
@@ -74,6 +74,17 @@ pub struct ShelfItem {
     #[serde(rename = "from")]
     pub from_label: String,
     pub created_at: String,
+}
+
+/// Global calendar reminder toast pushed by the daemon scheduler.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToastNotification {
+    pub id: String,
+    pub event_id: String,
+    pub title: String,
+    pub body: String,
+    pub event_at: String,
+    pub snooze_minutes: u32,
 }
 
 /// Session metadata row for `sessions` / `session_added` frames.
@@ -276,6 +287,18 @@ pub enum ClientFrame {
     /// `host.metrics.unwatch`: stop the metrics push; no answer frame.
     /// Remote-only.
     HostMetricsUnwatch,
+    /// `toast_dismiss{req,event_id}`: dismiss a calendar reminder toast.
+    ToastDismiss {
+        req: String,
+        event_id: String,
+    },
+    /// `toast_snooze{req,event_id,minutes?}`: snooze a calendar reminder toast
+    /// (default 5 minutes).
+    ToastSnooze {
+        req: String,
+        event_id: String,
+        minutes: Option<u32>,
+    },
 }
 
 /// Explicit agent launch fields from the New dialog (boxed so the `Spawn`
@@ -402,17 +425,45 @@ pub fn parse_client_frame(text: &str) -> Result<ClientFrame, FrameError> {
         "graph_control" => protocol_graph::parse(&value, &frame),
         "resumable_list" | "session_resume" => super::protocol_resume::parse(&value, &frame),
         "dir_list" => super::protocol_dir::parse(&value, &frame),
+        "host.metrics" | "host.metrics.watch" | "host.metrics.unwatch" => {
+            parse_host_metrics_frame(&value, &frame)
+        }
+        "toast_dismiss" | "toast_snooze" => parse_toast_frame(&value, &frame),
+        _ => Err(bad_request(None, format!("unknown frame '{frame}'"))),
+    }
+}
+
+fn parse_host_metrics_frame(value: &Value, frame: &str) -> Result<ClientFrame, FrameError> {
+    match frame {
         "host.metrics" => {
-            let req = req_field(&value, &frame)?;
+            let req = req_field(value, frame)?;
             Ok(ClientFrame::HostMetrics { req })
         }
         "host.metrics.watch" => {
-            let interval_s = opt_u64_field(&value, &frame, "interval_s")?;
+            let interval_s = opt_u64_field(value, frame, "interval_s")?;
             Ok(ClientFrame::HostMetricsWatch { interval_s })
         }
-        "host.metrics.unwatch" => Ok(ClientFrame::HostMetricsUnwatch),
-        _ => Err(bad_request(None, format!("unknown frame '{frame}'"))),
+        _ => Ok(ClientFrame::HostMetricsUnwatch),
     }
+}
+
+fn parse_toast_frame(value: &Value, frame: &str) -> Result<ClientFrame, FrameError> {
+    let req = req_field(value, frame)?;
+    let event_id = str_field(value, frame, "event_id")?;
+    if frame == "toast_dismiss" {
+        return Ok(ClientFrame::ToastDismiss { req, event_id });
+    }
+    let minutes = opt_u64_field(value, frame, "minutes")?
+        .map(|m| {
+            u32::try_from(m)
+                .map_err(|_| bad_request(None, format!("{frame}: field 'minutes' out of range")))
+        })
+        .transpose()?;
+    Ok(ClientFrame::ToastSnooze {
+        req,
+        event_id,
+        minutes,
+    })
 }
 
 /// Parse a `prompt` frame: `text` xor `draft`.
@@ -593,4 +644,49 @@ fn draft_field(value: &Value, frame: &str) -> Result<PromptDraft, FrameError> {
 fn encode_b64(data: &[u8]) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toast_frames_roundtrip() {
+        let toast = ToastNotification {
+            id: "t1".to_string(),
+            event_id: "ev1".to_string(),
+            title: "Standup".to_string(),
+            body: "2026-11-27 10:00 - Room A".to_string(),
+            event_at: "2026-11-27T10:00:00Z".to_string(),
+            snooze_minutes: 5,
+        };
+        let wire = toast_frame(&toast);
+        match parse_host_frame(&wire).expect("parse toast") {
+            HostFrame::Toast(parsed) => assert_eq!(parsed, toast),
+            other => panic!("unexpected host frame: {other:?}"),
+        }
+
+        let dismiss_wire = toast_dismiss_frame("r1", "ev1");
+        match parse_client_frame(&dismiss_wire).expect("parse toast_dismiss") {
+            ClientFrame::ToastDismiss { req, event_id } => {
+                assert_eq!(req, "r1");
+                assert_eq!(event_id, "ev1");
+            }
+            other => panic!("unexpected client frame: {other:?}"),
+        }
+
+        let snooze_wire = toast_snooze_frame("r2", "ev1", Some(5));
+        match parse_client_frame(&snooze_wire).expect("parse toast_snooze") {
+            ClientFrame::ToastSnooze {
+                req,
+                event_id,
+                minutes,
+            } => {
+                assert_eq!(req, "r2");
+                assert_eq!(event_id, "ev1");
+                assert_eq!(minutes, Some(5));
+            }
+            other => panic!("unexpected client frame: {other:?}"),
+        }
+    }
 }

@@ -76,6 +76,7 @@ pub(crate) fn draw_timed(frame: &mut Frame, app: &mut App, measure: bool) -> &'s
     app.hint_tip_got_it = None;
     app.hint_tip_hide_all = None;
     app.hub.help_reset_rect = None;
+    app.toast.clear_rects();
     let full = frame.area();
     frame.render_widget(
         ratatui::widgets::Paragraph::new("").style(Style::default().bg(theme.panel_bg)),
@@ -404,6 +405,7 @@ fn draw_top_overlays(frame: &mut Frame, app: &mut App, theme: &Theme) {
         draw_copied_badge(frame, theme);
     }
     draw_shelf_toast(frame, app, theme);
+    crate::tui::toast::draw_toasts(frame, app, theme);
 
     // Atmosphere particles — absolute top layer, drawn last over everything.
     // CM52: `tui.atmosphere = false` skips both the scene tick and the draw.

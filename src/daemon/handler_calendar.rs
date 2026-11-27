@@ -147,6 +147,7 @@ impl TaskTriggerHandler {
             Ok(event) => event,
             Err(e) => return Ok(error_result(&e.to_string())),
         };
+        self.scheduler_notify.notify_one();
         json_result(&event)
     }
 
@@ -167,12 +168,16 @@ impl TaskTriggerHandler {
             Ok(event) => event,
             Err(e) => return Ok(error_result(&e.to_string())),
         };
+        self.scheduler_notify.notify_one();
         json_result(&event)
     }
 
     fn calendar_delete_event(&self, params: &CalendarIdParams) -> Result<CallToolResult, McpError> {
         match self.db.delete_calendar_event(&params.id) {
-            Ok(true) => json_result(&serde_json::json!({ "deleted": true, "id": params.id })),
+            Ok(true) => {
+                self.scheduler_notify.notify_one();
+                json_result(&serde_json::json!({ "deleted": true, "id": params.id }))
+            }
             Ok(false) => Ok(error_result(&format!(
                 "Calendar event '{}' not found",
                 params.id

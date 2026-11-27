@@ -25,6 +25,7 @@ pub(crate) mod perf_log;
 pub(crate) mod prompt_templates;
 pub(crate) mod selection;
 pub(crate) mod terminal_history;
+pub(crate) mod toast;
 pub(crate) mod ui;
 mod whimsg;
 

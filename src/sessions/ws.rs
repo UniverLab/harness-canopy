@@ -26,15 +26,14 @@ use crate::sessions::outbound::{self, ConnTx, PushOut, SessionCoal};
 use super::auth::{bearer_token, ensure_token, token_valid};
 use super::catalog::{handle_catalog, handle_compose, handle_prompt_draft, handle_schedule_frame};
 use super::dir_list::handle_dir_list;
-use super::graphs::{
-    handle_graph_control, handle_graph_unwatch, handle_graph_watch, handle_graphs,
-};
+use super::graphs::handle_graph_frame;
 use super::protocol::{
     error_frame, exited_frame, file_frame, hello_frame, installed_harnesses, ok_frame, out_frame,
     parse_client_frame, resized_frame, session_added_frame, session_removed_frame,
     session_renamed_frame, sessions_frame, shelf_added_frame, shelf_frame, shelf_removed_frame,
-    size_released_frame, snapshot_frame, spawned_frame, ClientFrame, SessionItem, ERR_BAD_REQUEST,
-    ERR_DELIVERY_FAILED, ERR_FORBIDDEN, ERR_INTERNAL, ERR_NOT_FOUND, ERR_SPAWN_FAILED,
+    size_released_frame, snapshot_frame, spawned_frame, toast_frame, ClientFrame, SessionItem,
+    ERR_BAD_REQUEST, ERR_DELIVERY_FAILED, ERR_FORBIDDEN, ERR_INTERNAL, ERR_NOT_FOUND,
+    ERR_SPAWN_FAILED,
 };
 use super::protocol_resume::{handle_resumable_list, handle_session_resume};
 use super::shelf::{ShelfStore, READ_CHUNK_BYTES};
@@ -342,6 +341,19 @@ async fn handle_client_text(
         | ClientFrame::GraphControl { .. }) => {
             handle_graph_frame(state, out_tx, watches, frame).await;
         }
+        frame @ (ClientFrame::ResumableList { .. }
+        | ClientFrame::SessionResume { .. }
+        | ClientFrame::DirList { .. }
+        | ClientFrame::HostMetrics { .. }
+        | ClientFrame::HostMetricsWatch { .. }
+        | ClientFrame::HostMetricsUnwatch
+        | ClientFrame::ToastDismiss { .. }
+        | ClientFrame::ToastSnooze { .. }) => handle_misc_client_frame(state, out_tx, frame),
+    }
+}
+
+fn handle_misc_client_frame(state: &Arc<SessionsState>, out_tx: &OutTx, frame: ClientFrame) {
+    match frame {
         ClientFrame::ResumableList { req } => handle_resumable_list(state, out_tx, req),
         ClientFrame::SessionResume { req, id } => handle_session_resume(state, out_tx, req, id),
         ClientFrame::DirList { req, path } => handle_dir_list(state, out_tx, req, path),
@@ -349,32 +361,11 @@ async fn handle_client_text(
         ClientFrame::HostMetricsWatch { .. } | ClientFrame::HostMetricsUnwatch => {
             reject_host_metrics(out_tx, None);
         }
-    }
-}
-
-/// Graph plates over the local socket: the list, one watch's first answer
-/// and push task, unwatch, and the owner-agnostic `graph_control` pause or
-/// continue — the local socket answers every peer, so there is no gate.
-async fn handle_graph_frame(
-    state: &Arc<SessionsState>,
-    out_tx: &OutTx,
-    watches: &mut HashMap<String, JoinHandle<()>>,
-    frame: ClientFrame,
-) {
-    match frame {
-        ClientFrame::Graphs { req } => {
-            handle_graphs(state, out_tx, req);
+        frame @ (ClientFrame::ToastDismiss { .. } | ClientFrame::ToastSnooze { .. }) => {
+            let reply = super::ws_toast::handle(state.hub.db(), frame);
+            let _ = out_tx.send(reply);
         }
-        ClientFrame::GraphWatch { req, id } => {
-            handle_graph_watch(state, out_tx, watches, req, id).await;
-        }
-        ClientFrame::GraphUnwatch { id } => {
-            handle_graph_unwatch(watches, &id);
-        }
-        ClientFrame::GraphControl { req, id, action } => {
-            handle_graph_control(state, out_tx, req, id, action).await;
-        }
-        _ => unreachable!("non-graph frames never route to handle_graph_frame"),
+        _ => {}
     }
 }
 
@@ -709,6 +700,9 @@ fn handle_hub_event(out_tx: &OutTx, attached: &mut Attached, event: HubEvent) {
         }
         HubEvent::ShelfRemoved { file_id } => {
             let _ = out_tx.send(shelf_removed_frame(&file_id));
+        }
+        HubEvent::Toast(toast) => {
+            let _ = out_tx.send(toast_frame(&toast));
         }
     }
 }

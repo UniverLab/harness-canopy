@@ -389,6 +389,8 @@ pub struct App {
     pub(crate) hint_tip_open: Option<&'static str>,
     /// Last-rendered `[?]` marker cell, for click hit-testing.
     pub(crate) hint_marker: Option<ratatui::layout::Rect>,
+    /// Global non-blocking calendar reminder toast queue.
+    pub(crate) toast: crate::tui::toast::ToastQueue,
     /// Last-rendered tip action rows, for click hit-testing.
     pub(crate) hint_tip_got_it: Option<ratatui::layout::Rect>,
     pub(crate) hint_tip_hide_all: Option<ratatui::layout::Rect>,

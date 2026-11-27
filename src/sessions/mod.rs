@@ -30,6 +30,7 @@ pub mod shelf_confine;
 pub mod shelf_upload;
 pub mod spawn;
 pub mod ws;
+pub(crate) mod ws_toast;
 
 pub use hub::{
     HubEvent, HubSession, OutputReceiver, SessionHub, SessionKind, SessionStatus, SpawnRequest,

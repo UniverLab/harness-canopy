@@ -32,7 +32,7 @@ use crate::graph_engine::is_no_spec_placeholder;
 use crate::tui::mcp_client::call_daemon_tool;
 
 use super::protocol::{
-    error_frame, ok_frame, GraphControlAction, ERR_BUSY, ERR_INTERNAL, ERR_NOT_FOUND,
+    error_frame, ok_frame, ClientFrame, GraphControlAction, ERR_BUSY, ERR_INTERNAL, ERR_NOT_FOUND,
 };
 use super::ws::{OutTx, SessionsState};
 
@@ -636,4 +636,30 @@ fn node_name(db: &Database, node_id: Option<&str>) -> anyhow::Result<Option<Stri
         return Ok(None);
     };
     Ok(db.get_graph_node(node_id)?.map(|node| node.name))
+}
+
+/// Graph plates over the local socket: the list, one watch's first answer
+/// and push task, unwatch, and the owner-agnostic `graph_control` pause or
+/// continue — the local socket answers every peer, so there is no gate.
+pub(crate) async fn handle_graph_frame(
+    state: &Arc<SessionsState>,
+    out_tx: &OutTx,
+    watches: &mut HashMap<String, JoinHandle<()>>,
+    frame: ClientFrame,
+) {
+    match frame {
+        ClientFrame::Graphs { req } => {
+            handle_graphs(state, out_tx, req);
+        }
+        ClientFrame::GraphWatch { req, id } => {
+            handle_graph_watch(state, out_tx, watches, req, id).await;
+        }
+        ClientFrame::GraphUnwatch { id } => {
+            handle_graph_unwatch(watches, &id);
+        }
+        ClientFrame::GraphControl { req, id, action } => {
+            handle_graph_control(state, out_tx, req, id, action).await;
+        }
+        _ => unreachable!("non-graph frames never route to handle_graph_frame"),
+    }
 }

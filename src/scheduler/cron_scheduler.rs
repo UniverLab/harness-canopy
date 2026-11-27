@@ -246,6 +246,10 @@ impl CronScheduler {
 
         self.fold_fireable_graph_schedules(&mut earliest, now_local);
         self.fold_pending_one_shot_wakeups(&mut earliest);
+        fold_earliest_instant(
+            &mut earliest,
+            super::calendar_alerts::next_calendar_alert_at(&self.db),
+        );
 
         match earliest {
             Some(t) => earliest_duration_before(now_utc, t),
@@ -337,6 +341,12 @@ impl CronScheduler {
         self.fire_due_autorun_graphs(now_utc).await?;
         self.fire_due_auto_continue_graphs(now_utc)?;
         self.fire_due_scheduled_runs(now_utc)?;
+        super::calendar_alerts::fire_due_calendar_alerts(
+            &self.db,
+            self.hub.as_ref(),
+            crate::domain::notification::send_notification,
+            now_utc,
+        )?;
 
         Ok(())
     }

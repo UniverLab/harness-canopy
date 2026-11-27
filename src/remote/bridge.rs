@@ -46,8 +46,9 @@ use crate::sessions::graphs::{
 use crate::sessions::protocol::{
     error_frame, exited_frame, ok_frame, parse_client_frame, resized_frame, session_added_frame,
     session_removed_frame, session_renamed_frame, sessions_frame, shelf_added_frame,
-    shelf_missing_frame, shelf_removed_frame, ClientFrame, SessionItem, SpawnExt, ERR_BAD_REQUEST,
-    ERR_DELIVERY_FAILED, ERR_FORBIDDEN, ERR_INTERNAL, ERR_NOT_FOUND, ERR_SPAWN_FAILED,
+    shelf_missing_frame, shelf_removed_frame, toast_frame, ClientFrame, SessionItem, SpawnExt,
+    ERR_BAD_REQUEST, ERR_DELIVERY_FAILED, ERR_FORBIDDEN, ERR_INTERNAL, ERR_NOT_FOUND,
+    ERR_SPAWN_FAILED,
 };
 use crate::sessions::protocol_resume::{handle_resumable_list, handle_session_resume};
 use crate::sessions::ws::no_such_session;
@@ -291,7 +292,9 @@ impl RemoteBridge {
             | ClientFrame::DirList { .. }
             | ClientFrame::HostMetrics { .. }
             | ClientFrame::HostMetricsWatch { .. }
-            | ClientFrame::HostMetricsUnwatch) => self.handle_read_frame(frame, out).await,
+            | ClientFrame::HostMetricsUnwatch
+            | ClientFrame::ToastDismiss { .. }
+            | ClientFrame::ToastSnooze { .. }) => self.handle_read_frame(frame, out).await,
         }
     }
 
@@ -361,24 +364,11 @@ impl RemoteBridge {
                     handle_dir_list(&self.state, out, req, path);
                 }
             }
-            ClientFrame::HostMetrics { req } => {
-                if self.owner_allowed(out, &req, "host.metrics") {
-                    handle_host_metrics(&self.metrics, out, &req);
-                }
-            }
-            ClientFrame::HostMetricsWatch { interval_s } => {
-                if self.owner_allowed_noreq(out, "host.metrics.watch") {
-                    handle_host_metrics_watch(
-                        &mut self.metrics_watch,
-                        &self.metrics,
-                        out,
-                        interval_s,
-                    );
-                }
-            }
-            ClientFrame::HostMetricsUnwatch => {
-                handle_host_metrics_unwatch(&mut self.metrics_watch);
-            }
+            frame @ (ClientFrame::HostMetrics { .. }
+            | ClientFrame::HostMetricsWatch { .. }
+            | ClientFrame::HostMetricsUnwatch
+            | ClientFrame::ToastDismiss { .. }
+            | ClientFrame::ToastSnooze { .. }) => self.handle_metrics_or_toast(frame, out),
             ClientFrame::List { .. }
             | ClientFrame::Attach { .. }
             | ClientFrame::Detach { .. }
@@ -398,6 +388,41 @@ impl RemoteBridge {
             | ClientFrame::ShelfPutAbort { .. } => {
                 unreachable!("session frames never route to handle_read_frame");
             }
+        }
+    }
+
+    fn handle_metrics_or_toast(&mut self, frame: ClientFrame, out: &OutTx) {
+        match frame {
+            ClientFrame::HostMetrics { req } => {
+                if self.owner_allowed(out, &req, "host.metrics") {
+                    handle_host_metrics(&self.metrics, out, &req);
+                }
+            }
+            ClientFrame::HostMetricsWatch { interval_s } => {
+                if self.owner_allowed_noreq(out, "host.metrics.watch") {
+                    handle_host_metrics_watch(
+                        &mut self.metrics_watch,
+                        &self.metrics,
+                        out,
+                        interval_s,
+                    );
+                }
+            }
+            ClientFrame::HostMetricsUnwatch => {
+                handle_host_metrics_unwatch(&mut self.metrics_watch);
+            }
+            frame @ (ClientFrame::ToastDismiss { .. } | ClientFrame::ToastSnooze { .. }) => {
+                let req = match &frame {
+                    ClientFrame::ToastDismiss { req, .. }
+                    | ClientFrame::ToastSnooze { req, .. } => req.clone(),
+                    _ => String::new(),
+                };
+                if self.owner_allowed(out, &req, "toast") {
+                    let reply = crate::sessions::ws_toast::handle(self.state.hub.db(), frame);
+                    send(out, reply);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -488,6 +513,9 @@ impl RemoteBridge {
                 } else {
                     send(out, shelf_removed_frame(&file_id));
                 }
+            }
+            HubEvent::Toast(toast) => {
+                send(out, toast_frame(&toast));
             }
         }
     }

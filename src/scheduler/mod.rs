@@ -5,6 +5,7 @@
 //! - Prompt template variable substitution
 //! - Internal cron scheduler (tokio-based, replaces OS crontab/launchd)
 
+pub mod calendar_alerts;
 pub mod cron_scheduler;
 
 use chrono::Utc;

@@ -9,7 +9,9 @@ use serde_json::Value;
 
 use crate::domain::canopy_config::CanopyConfig;
 
-use super::{encode_b64, SessionItem, ShelfItem, SpawnExt, ERR_NOT_FOUND, PROTO_VERSION};
+use super::{
+    encode_b64, SessionItem, ShelfItem, SpawnExt, ToastNotification, ERR_NOT_FOUND, PROTO_VERSION,
+};
 
 /// Names of the configured CLIs whose binary resolves right now, sorted
 /// ascending. Resolution is the hub's own lookup
@@ -303,4 +305,35 @@ pub fn resumable_list_frame(req: &str) -> String {
 #[cfg(test)]
 pub fn session_resume_frame(req: &str, id: &str) -> String {
     serde_json::json!({"t": "session_resume", "req": req, "id": id}).to_string()
+}
+
+/// `toast{id,event_id,title,body,event_at,snooze_minutes}`: global calendar
+/// reminder toast pushed by the daemon.
+pub fn toast_frame(toast: &ToastNotification) -> String {
+    serde_json::json!({
+        "t": "toast",
+        "id": toast.id,
+        "event_id": toast.event_id,
+        "title": toast.title,
+        "body": toast.body,
+        "event_at": toast.event_at,
+        "snooze_minutes": toast.snooze_minutes,
+    })
+    .to_string()
+}
+
+/// `toast_dismiss{req,event_id}`: dismiss a calendar reminder toast.
+pub fn toast_dismiss_frame(req: &str, event_id: &str) -> String {
+    serde_json::json!({"t": "toast_dismiss", "req": req, "event_id": event_id}).to_string()
+}
+
+/// `toast_snooze{req,event_id,minutes}`: snooze a calendar reminder toast.
+pub fn toast_snooze_frame(req: &str, event_id: &str, minutes: Option<u32>) -> String {
+    serde_json::json!({
+        "t": "toast_snooze",
+        "req": req,
+        "event_id": event_id,
+        "minutes": minutes,
+    })
+    .to_string()
 }

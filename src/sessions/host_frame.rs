@@ -9,7 +9,7 @@ use super::catalog::{
     CatalogCli, CatalogData, CatalogPreset, CatalogProject, CatalogSkill, ScheduledPromptItem,
 };
 use super::graphs::{GraphState, GraphSummary};
-use super::protocol::{SessionItem, ShelfItem};
+use super::protocol::{SessionItem, ShelfItem, ToastNotification};
 use crate::domain::graph_transfer::GraphExportDocument;
 
 /// One frame sent by the hub, parsed by [`parse_host_frame`].
@@ -161,6 +161,9 @@ pub enum HostFrame {
         #[allow(dead_code)]
         state: Box<GraphState>,
     },
+    /// `toast{id,event_id,title,body,event_at,snooze_minutes}`: global calendar
+    /// reminder toast broadcast by the daemon scheduler.
+    Toast(ToastNotification),
     /// Any frame this build does not know: parsed so a newer host can talk
     /// to an older client (and vice versa), then ignored.
     Unknown,
@@ -300,6 +303,7 @@ enum HostFrameWire {
         id: String,
         state: Box<GraphState>,
     },
+    Toast(ToastNotification),
     /// Any `t` this build does not recognise: matches everything else, so
     /// an unknown frame from a newer peer parses (and is ignored) instead
     /// of failing the whole text.
@@ -383,6 +387,7 @@ pub fn parse_host_frame(text: &str) -> Result<HostFrame, String> {
             state,
         },
         HostFrameWire::GraphState { id, state } => HostFrame::GraphState { id, state },
+        HostFrameWire::Toast(toast) => HostFrame::Toast(toast),
         HostFrameWire::Catalog {
             req,
             clis,
