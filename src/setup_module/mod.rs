@@ -28,4 +28,4 @@ pub use public_api::{
     upsert_toml_key_pub,
 };
 pub use registry_fetch::{fetch_registry_raw, maybe_refresh_registry};
-pub use wizard::run_setup;
+pub use wizard::{run_setup, SetupOutcome};

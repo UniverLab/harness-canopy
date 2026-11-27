@@ -9,7 +9,14 @@ use crate::setup_module::sync_and_skills::{run_essential_skills_step, run_sync_s
 use crate::setup_module::PlatformWithCli;
 use anyhow::{Context, Result};
 use inquire::{Confirm, Select};
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
+
+/// Outcome of `run_setup` so callers know whether to launch the TUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupOutcome {
+    LaunchTui,
+    Done,
+}
 
 pub(crate) mod harnesses;
 mod rag;
@@ -38,7 +45,7 @@ fn format_platform_label(p: &Platform) -> String {
     }
 }
 
-pub fn run_setup(force_skills: bool) -> Result<()> {
+pub fn run_setup(force_skills: bool) -> Result<SetupOutcome> {
     let mut wiz = WizardState::new();
     let home = dirs::home_dir().context("No home directory")?;
     let canopy_dir = home.join(".canopy");
@@ -72,13 +79,13 @@ pub fn run_setup(force_skills: bool) -> Result<()> {
     let selected = harnesses::select_platforms_interactive(&registry.platforms)?;
     if selected.is_empty() {
         explain_no_platforms_detected(&registry);
-        return Ok(());
+        return Ok(SetupOutcome::Done);
     }
     record_platform_selection(&mut wiz, &selected);
 
     // ── Step 2.2: Temperature unit preference ────────────────────
     wiz.render()?;
-    let temperature_unit = select_temperature_unit()?;
+    let temperature_unit = select_temperature_unit(existing_config.temperature_unit)?;
     wiz.add(format!(
         "\x1b[32m✓\x1b[0m Temperature unit: {}",
         match temperature_unit {
@@ -89,7 +96,7 @@ pub fn run_setup(force_skills: bool) -> Result<()> {
 
     // ── Step 2.23: Announcements opt-in ──────────────────────────
     wiz.render()?;
-    let announcements_enabled = select_announcements()?;
+    let announcements_enabled = select_announcements(existing_config.announcements_enabled)?;
     wiz.add(format!(
         "\x1b[32m✓\x1b[0m Announcements: {}",
         if announcements_enabled { "on" } else { "off" }
@@ -141,7 +148,7 @@ pub fn run_setup(force_skills: bool) -> Result<()> {
     )?;
     maybe_print_stun_notice(legacy_stun);
 
-    Ok(())
+    prompt_open_tui()
 }
 
 /// Clear the screen, print the banner, and fetch the platform registry —
@@ -609,10 +616,47 @@ impl WizardState {
     }
 }
 
-fn select_temperature_unit() -> Result<crate::domain::canopy_config::TemperatureUnit> {
+fn should_prompt_open_tui(is_tty: bool) -> bool {
+    is_tty
+}
+
+fn resolve_open_tui_answer(open_tui: bool, out: &mut impl Write) -> SetupOutcome {
+    if open_tui {
+        SetupOutcome::LaunchTui
+    } else {
+        let _ = writeln!(out, "Run 'canopy' to open the TUI.");
+        SetupOutcome::Done
+    }
+}
+
+fn prompt_open_tui() -> Result<SetupOutcome> {
+    let is_tty = io::stdin().is_terminal() && io::stdout().is_terminal();
+    if !should_prompt_open_tui(is_tty) {
+        return Ok(SetupOutcome::Done);
+    }
+    let open_tui = match Confirm::new("Open canopy now?").with_default(true).prompt() {
+        Ok(answer) => answer,
+        Err(inquire::InquireError::OperationCanceled) => false,
+        Err(err) => return Err(anyhow::anyhow!("TUI launch prompt failed: {}", err)),
+    };
+    Ok(resolve_open_tui_answer(open_tui, &mut io::stdout()))
+}
+
+fn temperature_unit_starting_cursor(
+    existing: crate::domain::canopy_config::TemperatureUnit,
+) -> usize {
+    match existing {
+        crate::domain::canopy_config::TemperatureUnit::Celsius => 0,
+        crate::domain::canopy_config::TemperatureUnit::Fahrenheit => 1,
+    }
+}
+
+fn select_temperature_unit(
+    existing: crate::domain::canopy_config::TemperatureUnit,
+) -> Result<crate::domain::canopy_config::TemperatureUnit> {
     let options = ["Celsius (°C)", "Fahrenheit (°F)"];
     let selected = Select::new("Temperature unit for sysinfo:", options.to_vec())
-        .with_starting_cursor(0)
+        .with_starting_cursor(temperature_unit_starting_cursor(existing))
         .with_help_message("enter: confirm | ↑↓: navigate")
         .prompt()
         .map_err(|e| anyhow::anyhow!("Temperature selection cancelled: {}", e))?;
@@ -623,14 +667,18 @@ fn select_temperature_unit() -> Result<crate::domain::canopy_config::Temperature
     })
 }
 
-/// Ask whether announcements are wanted (default No). The answer is always
-/// written as `announcements_enabled`, so every configured config holds
-/// the key.
-fn select_announcements() -> Result<bool> {
+fn announcements_default(saved: bool) -> bool {
+    saved
+}
+
+/// Ask whether announcements are wanted (defaulting to the saved value).
+/// The answer is always written as `announcements_enabled`, so every
+/// configured config holds the key.
+fn select_announcements(saved: bool) -> Result<bool> {
     let answer = Confirm::new(
         "Receive UniverLab announcements (opens a connection to announcements.univerlab.org)?",
     )
-    .with_default(false)
+    .with_default(announcements_default(saved))
     .prompt()
     .map_err(|e| anyhow::anyhow!("Announcements selection cancelled: {}", e))?;
     Ok(answer)
@@ -1435,5 +1483,51 @@ mod tests {
         assert_eq!(threshold, 0.42);
         assert!(dirs.is_empty());
         assert_eq!(max_mb, 77);
+    }
+
+    #[test]
+    fn should_prompt_open_tui_respects_tty() {
+        assert!(should_prompt_open_tui(true));
+        assert!(!should_prompt_open_tui(false));
+    }
+
+    #[test]
+    fn resolve_open_tui_answer_maps_yes_and_no() {
+        let mut yes_buf = Vec::new();
+        assert_eq!(
+            resolve_open_tui_answer(true, &mut yes_buf),
+            SetupOutcome::LaunchTui
+        );
+        assert!(yes_buf.is_empty());
+
+        let mut no_buf = Vec::new();
+        assert_eq!(
+            resolve_open_tui_answer(false, &mut no_buf),
+            SetupOutcome::Done
+        );
+        let printed = String::from_utf8(no_buf).unwrap();
+        assert!(
+            printed.contains("Run 'canopy' to open the TUI."),
+            "unexpected output: {printed}"
+        );
+    }
+
+    #[test]
+    fn temperature_unit_starting_cursor_matches_saved_value() {
+        use crate::domain::canopy_config::TemperatureUnit;
+        assert_eq!(
+            temperature_unit_starting_cursor(TemperatureUnit::Celsius),
+            0
+        );
+        assert_eq!(
+            temperature_unit_starting_cursor(TemperatureUnit::Fahrenheit),
+            1
+        );
+    }
+
+    #[test]
+    fn announcements_default_mirrors_saved_bool() {
+        assert!(announcements_default(true));
+        assert!(!announcements_default(false));
     }
 }

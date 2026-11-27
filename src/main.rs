@@ -484,8 +484,10 @@ async fn dispatch_rest(command: Option<Commands>, port: Option<u16>) -> Result<(
         }
         None => {
             tokio::task::block_in_place(|| {
-                if setup_module::needs_setup() {
-                    setup_module::run_setup(false)?;
+                if setup_module::needs_setup()
+                    && setup_module::run_setup(false)? == setup_module::SetupOutcome::Done
+                {
+                    return Ok(());
                 }
                 setup_module::maybe_refresh_registry();
                 autoupdate::maybe_spawn_update_notice();
@@ -571,7 +573,10 @@ fn handle_setup_action(args: SetupActionArgs) -> Result<()> {
     if args.list_harnesses {
         setup_module::run_list_harnesses(args.json)
     } else {
-        tokio::task::block_in_place(|| setup_module::run_setup(args.force_skills))
+        tokio::task::block_in_place(|| match setup_module::run_setup(args.force_skills)? {
+            setup_module::SetupOutcome::LaunchTui => tui::run_tui(),
+            setup_module::SetupOutcome::Done => Ok(()),
+        })
     }
 }
 

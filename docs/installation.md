@@ -26,6 +26,12 @@ curl -fsSL https://raw.githubusercontent.com/UniverLab/harness-canopy/{{TAG}}/sc
 (`{{TAG}}` is stamped with the release tag by `scripts/release-docs.sh`
 before tagging, so the command serves the tagged, immutable install script.)
 
+When a terminal is attached (`/dev/tty` is readable and writable),
+`scripts/install.sh` runs `canopy setup` automatically after installing
+the binary. Set `CANOPY_NO_SETUP=1` to skip the automatic wizard (or in
+non-interactive environments without a terminal, it skips it and prints
+`Run 'canopy setup' to finish setup.`).
+
 ## Signature verification
 
 The install script verifies the download before installing it. Each release
@@ -82,7 +88,11 @@ shows every registry harness with its install status and dated free-tier
 fact, pre-selects the installed ones to configure, and prompts for the
 temperature unit (plus RAG settings and skill sync), asks whether to receive
 UniverLab announcements (default no; stays off unless you say yes),
-then writes `~/.canopy/config.toml`. For installed harnesses with a vendor
+then writes `~/.canopy/config.toml` (re-running `canopy setup` starts each
+prompt from the values already saved there). At the end of an
+interactive run, it asks `Open canopy now? [Y/n]` to launch the TUI
+directly (answering no or pressing `Esc` prints `Run 'canopy' to open
+the TUI.` and exits `0`). For installed harnesses with a vendor
 login command, `l` opens the login flow in a PTY (Esc cancels) and `r`
 retries a failed check. On an install that still holds the
 previous STUN fallback, setup prints `STUN fallback is set to the

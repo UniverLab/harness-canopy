@@ -141,4 +141,10 @@ fi
 
 info "done" "$($INSTALL_DIR/$BINARY --version 2>/dev/null || echo "$BINARY installed")"
 echo ""
-info "ready" "Run 'canopy daemon start' to get started!"
+if [ "${CANOPY_NO_SETUP:-}" = "1" ]; then
+  info "ready" "Run 'canopy setup' to finish setup."
+elif [ -r /dev/tty ] && [ -w /dev/tty ] && (exec </dev/tty >/dev/tty) 2>/dev/null; then
+  "$INSTALL_DIR/canopy" setup </dev/tty >/dev/tty 2>&1
+else
+  info "ready" "Run 'canopy setup' to finish setup."
+fi
