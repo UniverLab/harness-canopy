@@ -276,16 +276,21 @@ handles, **Missions & stats** lists all the missions above — unlocked
 ones in full colour, locked ones dimmed — **Shelf** lists the files
 agents have sent (see below), **Remote** is everything `canopy remote`
 does (see below), and **Help** lists the main keys, explains graphs in one
-line, and resets the first-run hints. `Shift+←`/`Shift+→`
+line, and resets the first-run hints (`r` or click). `Shift+←`/`Shift+→`
 switch tabs, as everywhere else in Canopy; `Tab`/`Shift+Tab` and `1`–`6`
 also switch. `F1` closes the hub from any state; `Esc` closes it from the top
 level of every tab. `F1` works everywhere — including inside a focused
 interactive session whose harness has claimed the keyboard (alternate screen
 or the Kitty protocol) — the key opens the hub instead of being forwarded to
-the session, except when a hint marker is showing: then `F1` opens that
-hint's tip (clicking the `[?]` marker does the same), and `F1` or `Esc`
-closes the tip. The tip's `Got it` (`y`/`Enter`) and `Hide all hints` (`n`)
-actions persist; hints stay hidden on terminals under 80×20.
+the session, except when the hub is closed and a hint marker is showing: then
+`F1` opens that hint's tip (clicking the `[?]` marker does the same; in the
+hub header, click `[?]` since `F1` closes the hub), and `F1` or `Esc`
+closes the tip. Hints appear one at a time as a pulsing `[?]` marker under
+the empty start banner (`Ctrl+N`), beside the top-right prompt strip in an
+open session (`F5`), and in the hub header (`?`). Each tip's `Got it`
+(`y`/`Enter` or click) and `Hide all hints` (`n` or click) actions persist
+in `~/.canopy/usage.toml` (`hints_dismissed` and `hints_hidden`); hints stay
+hidden on terminals under 80×20.
 
 In **Settings**, the `↑`/`↓` keys move within the focused column and `→` or
 `Enter` step from the category list into its properties (`←` goes back, keeping
