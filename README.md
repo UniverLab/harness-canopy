@@ -126,7 +126,7 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 - **📊 Real-time File Watcher** — Instantly reacts to file system events (create, modify, delete, move) using the `notify` crate with configurable debouncing, recursive directory monitoring, and macOS FSEvents compatibility.
 - **💾 Persistent State** — All tasks, watchers, execution logs, agent state, sync messages, intelligence nodes, graphs, and projects are stored in an embedded SQLite database with WAL mode and automatic schema migration.
 - **🔄 Auto-Update** — `canopy update` checks GitHub releases for a newer stable version, asks first (default no), refuses cargo installs, verifies the release's minisign signature and SHA-256 before replacing the executable, and restarts the daemon. `canopy update --check` exits 0 (up to date), 1 (update available), or 2 (check failed).
-- **🔔 Cross-Platform Notifications** — Native desktop notifications for task completions, failures, and watcher triggers. Auto-detects platform: WSL (PowerShell toasts with AUMID), macOS (`osascript`), Linux (`notify-send`).
+- **🔔 Cross-Platform Notifications** — Native desktop notifications for task completions, failures, watcher triggers, and calendar reminders (paired with global non-blocking TUI toasts offering `[Dismiss]` and `[Snooze 5m]`). Auto-detects platform: WSL (PowerShell toasts with AUMID), macOS (`osascript`), Linux (`notify-send`).
 
 ### 🤖 Agent Management
 
@@ -204,7 +204,7 @@ session later instead of polling), and `intelligence_upsert` /
 - **MCP Wizard** — `canopy mcp` subcommand for syncing, adding, and removing MCP server entries across all detected platforms with automatic format conversion (JSON ↔ TOML). It also rewrites legacy unauthenticated URL-form canopy MCP entries to the stdio `canopy bridge` form on start.
 - **Skills** — Installs the embedded `canopy` skill into each harness (`canopy skill install`), reads all other skills live via `canopy skill list` / `canopy skill get <name>` without copying them into harnesses, and cleans up legacy skill copies.
 - **Doctor Diagnostics** — `canopy doctor` checks data directory, database, config, harnesses, RAG status, file watchers, daemon process, registry connectivity, and auto-update health.
-- **Desktop Notifications** — Cross-platform alerts for task completions, failures, watcher triggers, RAG indexing events, and graph lifecycle (started, spec completed, finished with outcome, blocker, hook failure).
+- **Desktop Notifications** — Cross-platform alerts for task completions, failures, watcher triggers, calendar reminders, RAG indexing events, and graph lifecycle (started, spec completed, finished with outcome, blocker, hook failure).
 
 ---
 

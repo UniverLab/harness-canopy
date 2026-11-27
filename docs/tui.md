@@ -516,11 +516,11 @@ without a type show the name alone.
 ## Notifications
 
 Native desktop notifications for task completions, failures, watcher
-triggers, and graph lifecycle events (graph started, spec completed with
-progress, graph finished with outcome, blocker reported, completion hook
-failure). Platform auto-detected: WSL (PowerShell toasts), macOS
-(`osascript`), Linux (`notify-send`). Set `notifications.enabled = false`
-to silence them.
+triggers, calendar reminders, and graph lifecycle events (graph started,
+spec completed with progress, graph finished with outcome, blocker
+reported, completion hook failure). Platform auto-detected: WSL
+(PowerShell toasts), macOS (`osascript`), Linux (`notify-send`). Set
+`notifications.enabled = false` to silence them.
 
 A message delivered into this session by a graph hook or by an agent's
 `send_to_session` trigger raises one too, naming the sender instead of
@@ -532,6 +532,30 @@ session`. When the graph or agent no longer exists, the first 8
 characters of its id stand in for the name. A send held because the user
 is typing in the target session raises one `Scheduled send held`
 notification naming that session once it has been held for over a minute.
+
+### Calendar reminder toasts
+
+When a personal calendar event reaches its alert time (`at - lead_minutes`,
+or `snoozed_until` after a snooze), the daemon fires both a native OS
+notification (`Canopy Calendar: <title>` with the local event time and
+optional notes) and a non-blocking TUI toast over every connected session:
+
+- **Placement & stacking** — toasts render at the top-right corner above
+  any active view (Home, Agent session, Terminal, or Hub) without stealing
+  keyboard focus from a running PTY. Up to **3** toasts stack oldest-first;
+  each shows the title, event time/notes, and `[Dismiss]` / `[Snooze 5m]`
+  buttons.
+- **Controls** (always act on the clicked toast, or the oldest visible
+  toast for keyboard shortcuts):
+  - **Mouse** — click `[Dismiss]` or `[Snooze 5m]` from anywhere.
+  - **`Alt+D` / `Alt+S`** — dismiss or snooze for 5 minutes globally over
+    any active view, including a focused agent or terminal PTY and the Hub.
+  - **`d` / `s`** — dismiss or snooze for 5 minutes when focused on Home
+    or Preview with no modal, Hub, or text input active.
+- **Behaviour** — dismissing a non-recurring event marks it dismissed;
+  dismissing a recurring event advances `at` to its next occurrence and
+  clears its snooze and notification state. Snoozing reschedules the
+  reminder 5 minutes from now.
 
 ## Colour and tinting
 
