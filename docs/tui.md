@@ -51,7 +51,14 @@ graphs and the CLI, but it is no longer offered in this dialog.
     list that canopy has never seen starts a fresh session with a new id and
     a new generated name, as before.
   - When canopy recorded the harness's own conversation id, the relaunch
-    resumes that exact conversation (`muse resume <id>`); otherwise it
+    resumes that exact conversation (`muse resume <id>`,
+    `agy --conversation <id>`, `claude --resume <id>`). Fresh interactive
+    sessions record that id automatically for `muse` and `antigravity`
+    (by process discovery, with history fallback) and for harnesses whose
+    `[[clis]]` entry sets both `session_id_set_flag` and
+    `session_resume_cmd` (by pre-assigning a UUID at spawn, except `muse`),
+    so multiple concurrent sessions of the same harness in one directory
+    each resume their own conversation cleanly. Otherwise relaunch
     falls back to the harness's most-recent resume, and only one session
     per harness and directory may take that fallback at a restart — the
     rest fail with an explanation instead of colliding on one

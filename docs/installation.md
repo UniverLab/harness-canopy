@@ -352,6 +352,15 @@ enumerating. `graph_control` `preflight` flags every existing node that uses one
 Omit the field — the default is `true` — and the platform behaves exactly
 as before.
 
+An entry (other than `muse`) that sets both `session_id_set_flag` (for
+example `--session-id`) and `session_resume_cmd` (for example `--resume`)
+gets a fresh UUID pre-assigned at spawn for every non-preserved
+interactive session that does not already carry that flag, `resume_args`,
+or `session_resume_cmd`. Canopy records that UUID on the session without
+persisting the set flag in `args`, so concurrent sessions in the same
+directory each resume their own conversation with `<session_resume_cmd>
+<id>` instead of colliding on a shared `--continue`.
+
 ## Health check
 
 ```bash
