@@ -1,12 +1,12 @@
 ---
 title: MCP Tools
-description: All 34 MCP tools exposed by the canopy daemon, by category.
+description: All 36 MCP tools exposed by the canopy daemon, by category.
 order: 17
 ---
 
 # MCP Tools
 
-The daemon exposes **34 MCP tools** over Streamable HTTP (port 7755) and
+The daemon exposes **36 MCP tools** over Streamable HTTP (port 7755) and
 stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
 Every HTTP request under `/mcp` must present the daemon token as an
@@ -148,7 +148,7 @@ See [Graphs](graphs.md).
 
 Kept callable for the whole 3.x line, but excluded from tool listings
 (`tools/list`) so nothing new adopts them — call the 3.x name instead. Not
-counted in the 35 tools above.
+counted in the 36 tools above.
 
 | Deprecated name | Renamed to (3.0.0) |
 |---|---|
@@ -239,7 +239,7 @@ ensembles — a crew.
 
 | Tool | Description |
 |---|---|
-| `calendar` | Manage personal calendar events and per-project roadmap milestones. Actions: `list_events` (optional `from`, `to`, `include_dismissed`), `create_event` (`title`, `at`, optional `notes`, `recurrence`, `lead_minutes`), `update_event` (`id`, optional `title`, `notes`, `at`, `recurrence`, `lead_minutes`, `snoozed_until`, `dismissed_at`), `delete_event` (`id`), `list_milestones` (optional `project_path`, `status`), `create_milestone` (`project_path`, `title`, optional `notes`, `due_at`, `status`), `update_milestone` (`id`, optional `title`, `notes`, `due_at`, `status`), `delete_milestone` (`id`) — pass `action` plus the params the refusal/table lists |
+| `calendar` | Manage personal calendar events and per-project roadmap milestones. Actions: `list_events` (optional `from`, `to`, `include_dismissed` default `false`), `create_event` (`title`, `at`, optional `notes`, `recurrence` `none` (default)/`daily`/`weekly`/`monthly`, `lead_minutes` >= 0 default `10`), `update_event` (`id`, optional `title`, `notes`, `at`, `recurrence`, `lead_minutes`, `snoozed_until`, `dismissed_at`), `delete_event` (`id`), `list_milestones` (optional `project_path`, `status` `planned`/`active`/`done`), `create_milestone` (`project_path`, `title`, optional `notes`, `due_at`, `status` default `planned`), `update_milestone` (`id`, optional `title`, `notes`, `due_at`, `status`), `delete_milestone` (`id`) — timestamps are RFC 3339; pass `action` plus the params the refusal/table lists |
 
 ## Project (1)
 
