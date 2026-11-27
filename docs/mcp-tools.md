@@ -76,6 +76,14 @@ The most specific entry wins: exact model, then the longest `*` prefix, then the
 platform-wide entry. An `unavailable` entry past its `until` reads as available
 (expired) — expiry is evaluated at read time, never by a timer.
 
+When `harness` `models` is called with `platform`, it runs that platform's
+`models_list_cmd` if declared in the registry (accepting both one-id-per-line
+and `<id><TAB><label>` listings while skipping status lines that contain
+spaces) and falls back to the `models.dev` catalogue if no ids are returned.
+If the platform has neither a `models_list_cmd` nor a catalogue provider
+mapping, the error names both gaps and suggests omitting `platform` to list
+all providers.
+
 ## Intelligence (4)
 
 | Tool | Description |
