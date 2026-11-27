@@ -147,6 +147,34 @@ take a node id (or an unambiguous prefix), not a name. Note there is
 deliberately no `fail` edge out of `sweep`: that is what makes a quiet
 tick complete idle instead of failing the graph.
 
+## One-shot scheduled runs
+
+To run a graph once at a specific future time rather than on a repeating
+cron schedule, use `graph_control` `schedule_run` with `graph_id` and an
+RFC 3339 timestamp `at` (must be in the future). Optional parameters:
+`idea` or `queue_id` (mutually exclusive), `workdir`, and `on_miss`
+(`"skip"` by default, or `"run"`).
+
+`CronScheduler` wakes at the earliest `pending` `fire_at`. When `fire_at`
+is reached:
+
+- Within 60 seconds of `fire_at` (or with `on_miss: "run"`), the engine
+  launches the graph with the stored `idea`, `queue_id`, and `workdir`,
+  and marks the scheduled run `fired` (or `error` if the graph is
+  missing, blocked by status, or already has an in-flight run).
+- More than 60 seconds past `fire_at` (for example, while the daemon was
+  offline) with `on_miss: "skip"`, the entry is marked `missed` without
+  launching.
+
+Inspect, cancel, or manually launch scheduled runs with `graph_control`:
+
+- `list_scheduled_runs` (optional `graph_id`, `status`) — lists one-shot
+  scheduled runs ordered by `fire_at` ascending.
+- `cancel_scheduled_run` (`id`) — cancels a `pending` or `missed` entry
+  (refuses already `fired` entries).
+- `run_scheduled_run` (`id`) — launches a `missed` or `pending` entry
+  immediately and marks it `fired`.
+
 ## Tuning the engine
 
 These `[graphs]` settings (see `canopy config list`) adjust the engine's
