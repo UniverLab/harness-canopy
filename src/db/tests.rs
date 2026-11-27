@@ -420,6 +420,7 @@ fn find_matching_paren(s: &str, open_pos: usize) -> usize {
 }
 
 mod graph_crew_tests;
+mod graph_crew_unbound_tests;
 #[cfg(test)]
 mod hooks_tests;
 mod mutex_tests;

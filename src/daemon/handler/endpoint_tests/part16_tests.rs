@@ -882,6 +882,7 @@ async fn crew_round_trip() {
             model: None,
             include_archived: None,
             group_by: None,
+            unbound: None,
         }),
     )
     .await

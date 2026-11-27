@@ -4,8 +4,9 @@
 use super::*;
 use crate::daemon::params::{
     CrewCreateParams, CrewGetParams, CrewMemberJson, CrewModelDeleteParams, CrewModelSetParams,
-    CrewUpdateParams,
+    CrewUpdateParams, GraphCrewParams,
 };
+use crate::domain::graphs::{GraphCompletionHook, GraphHookEvent};
 
 fn ref_crew_params(name: &str) -> CrewCreateParams {
     CrewCreateParams {
@@ -349,4 +350,287 @@ async fn model_delete_is_refused_while_referenced_then_succeeds() {
     .unwrap();
     assert!(!is_err(&deleted), "{}", text(&deleted));
     assert!(db.crew_model_list().unwrap().is_empty());
+}
+
+async fn setup_unbound_audit_fixture() -> (
+    tempfile::TempDir,
+    std::sync::Arc<Database>,
+    TaskTriggerHandler,
+    String,
+) {
+    let (dir, db, handler) = endpoint_test_handler();
+    let workdir = dir.path().to_string_lossy().to_string();
+
+    let created_crew = call_resource_action(
+        &handler,
+        "crew",
+        "create",
+        params_id(CrewCreateParams {
+            name: "eager".to_string(),
+            description: None,
+            members: Some(vec![crew_json_member("claude"), crew_json_member("codex")]),
+            from_ensemble: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&created_crew), "{}", text(&created_crew));
+
+    let (mixed_graph, _) = build_crew_ensemble(&handler, &workdir, "Mixed").await;
+    let bound_node = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
+            spec_id: None,
+            graph_id: Some(mixed_graph.clone()),
+            name: "crew-node".to_string(),
+            kind: Some("agent".to_string()),
+            config: serde_json::json!({ "crew": "eager", "prompt_template": "run" })
+                .as_object()
+                .cloned(),
+            node: None,
+            config_overrides: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&bound_node), "{}", text(&bound_node));
+
+    let nodes: Vec<_> = db
+        .list_all_graph_nodes()
+        .unwrap()
+        .into_iter()
+        .filter(|n| n.graph_id.as_deref() == Some(mixed_graph.as_str()))
+        .collect();
+    let kickoff_id = nodes
+        .iter()
+        .find(|n| n.name == "kickoff")
+        .unwrap()
+        .id
+        .clone();
+    let downstream_id = nodes
+        .iter()
+        .find(|n| n.name == "downstream")
+        .unwrap()
+        .id
+        .clone();
+    let literal_ens = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(serde_json::json!({
+            "graph_id": mixed_graph,
+            "name": "literal-ens",
+            "from_node": kickoff_id,
+            "condition": "always",
+            "on_pass_to": downstream_id,
+            "members": [
+                { "platform": "claude", "model": "sonnet" },
+                { "platform": "codex", "model": "gpt-5" }
+            ],
+            "prompt_template": "review"
+        })),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&literal_ens), "{}", text(&literal_ens));
+
+    let mut graph_rec = db.get_graph(&mixed_graph).unwrap().unwrap();
+    graph_rec.hooks.insert(
+        GraphHookEvent::OnCompleted,
+        vec![GraphCompletionHook {
+            platform: Some("claude".to_string()),
+            crew: None,
+            spec_ids: None,
+            model: Some("haiku".to_string()),
+            effort: None,
+            prompt: Some("notify".to_string()),
+            command: None,
+            target_session_id: None,
+            target_session_name: None,
+            timeout_minutes: Some(5),
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+        }],
+    );
+    db.update_graph_hooks(&mixed_graph, &graph_rec.hooks)
+        .unwrap();
+    add_bound_and_archived_graphs(&db, &handler, &workdir).await;
+
+    (dir, db, handler, mixed_graph)
+}
+
+async fn add_bound_and_archived_graphs(db: &Database, handler: &TaskTriggerHandler, workdir: &str) {
+    let fully_bound = call_graph_action(
+        handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
+            name: "FullyBound".to_string(),
+            description: None,
+            workdir: workdir.to_string(),
+            trigger: None,
+            trigger_prompt: None,
+            infra_node_id: None,
+            allow_dirty_start: false,
+            require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
+        }),
+    )
+    .await
+    .unwrap();
+    let fully_bound_id = extract_id(&fully_bound, "graph_id");
+    let bound_only_node = call_graph_action(
+        handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
+            spec_id: None,
+            graph_id: Some(fully_bound_id),
+            name: "bound-only".to_string(),
+            kind: Some("agent".to_string()),
+            config: serde_json::json!({ "crew": "eager", "prompt_template": "run" })
+                .as_object()
+                .cloned(),
+            node: None,
+            config_overrides: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&bound_only_node), "{}", text(&bound_only_node));
+
+    let archived = call_graph_action(
+        handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
+            name: "ArchivedLit".to_string(),
+            description: None,
+            workdir: workdir.to_string(),
+            trigger: None,
+            trigger_prompt: None,
+            infra_node_id: None,
+            allow_dirty_start: false,
+            require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
+        }),
+    )
+    .await
+    .unwrap();
+    let archived_id = extract_id(&archived, "graph_id");
+    let arch_node = call_graph_action(
+        handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
+            spec_id: None,
+            graph_id: Some(archived_id.clone()),
+            name: "arch-lit".to_string(),
+            kind: Some("agent".to_string()),
+            config: Some(agent_node_config("codex")),
+            node: None,
+            config_overrides: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&arch_node), "{}", text(&arch_node));
+    db.archive_graph(&archived_id).unwrap();
+}
+
+#[tokio::test]
+async fn graph_audit_and_crew_assignments_unbound_report_literal_targets() {
+    let (_dir, _db, handler, mixed_graph) = setup_unbound_audit_fixture().await;
+
+    let audit = call_graph_action(&handler, "graph", "audit", params_id(serde_json::json!({})))
+        .await
+        .unwrap();
+    assert!(!is_err(&audit), "{}", text(&audit));
+    let audit_body: serde_json::Value = serde_json::from_str(&raw_text(&audit)).unwrap();
+    assert_eq!(audit_body["unbound_to_crew_total"], 4, "{audit_body}");
+    let unbound_graphs = audit_body["unbound_to_crew"].as_array().unwrap();
+    assert_eq!(unbound_graphs.len(), 1, "{audit_body}");
+    assert_eq!(unbound_graphs[0]["graph_id"], mixed_graph);
+    assert_eq!(
+        unbound_graphs[0]["agent_nodes"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(unbound_graphs[0]["agent_nodes"][0]["name"], "downstream");
+    let ensembles = unbound_graphs[0]["ensembles"].as_array().unwrap();
+    assert_eq!(ensembles.len(), 1, "{audit_body}");
+    assert_eq!(ensembles[0]["name"], "literal-ens");
+    assert_eq!(ensembles[0]["members"].as_array().unwrap().len(), 2);
+    let hooks = unbound_graphs[0]["hooks"].as_array().unwrap();
+    assert_eq!(hooks.len(), 1);
+    assert_eq!(hooks[0]["event"], "on_completed");
+
+    let assignments = call_resource_action(
+        &handler,
+        "crew",
+        "assignments",
+        params_id(GraphCrewParams {
+            graph_id: None,
+            platform: None,
+            model: None,
+            include_archived: None,
+            group_by: None,
+            unbound: Some(true),
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&assignments), "{}", text(&assignments));
+    let assign_body: serde_json::Value = serde_json::from_str(&raw_text(&assignments)).unwrap();
+    let assign_graphs = assign_body.as_array().unwrap();
+    assert_eq!(assign_graphs.len(), 1, "{assign_body}");
+    assert_eq!(assign_graphs[0]["id"], mixed_graph);
+    assert_eq!(assign_graphs[0]["rows"].as_array().unwrap().len(), 4);
+
+    let with_archived = call_resource_action(
+        &handler,
+        "crew",
+        "assignments",
+        params_id(GraphCrewParams {
+            graph_id: None,
+            platform: None,
+            model: None,
+            include_archived: Some(true),
+            group_by: None,
+            unbound: Some(true),
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&with_archived), "{}", text(&with_archived));
+    let arch_body: serde_json::Value = serde_json::from_str(&raw_text(&with_archived)).unwrap();
+    assert_eq!(arch_body.as_array().unwrap().len(), 2, "{arch_body}");
+
+    let filtered = call_resource_action(
+        &handler,
+        "crew",
+        "assignments",
+        params_id(GraphCrewParams {
+            graph_id: None,
+            platform: Some("claude".to_string()),
+            model: None,
+            include_archived: Some(true),
+            group_by: None,
+            unbound: Some(true),
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&filtered), "{}", text(&filtered));
+    let filtered_body: serde_json::Value = serde_json::from_str(&raw_text(&filtered)).unwrap();
+    let filtered_graphs = filtered_body.as_array().unwrap();
+    assert_eq!(filtered_graphs.len(), 1, "{filtered_body}");
+    assert_eq!(filtered_graphs[0]["rows"].as_array().unwrap().len(), 3);
 }

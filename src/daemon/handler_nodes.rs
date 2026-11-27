@@ -20,7 +20,11 @@ use crate::daemon::handler_validate::{
 };
 use crate::daemon::helpers::error_result;
 use crate::daemon::params::*;
-use crate::domain::graphs::{validate_router_routes, GraphNode, GraphNodeKind};
+use crate::db::graph_crew::GraphCrewDbParams;
+use crate::db::Database;
+use crate::domain::graphs::{
+    validate_router_routes, CrewRowKind, GraphCrewGroup, GraphNode, GraphNodeKind,
+};
 use crate::or_early_return;
 use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::tool_router;
@@ -185,12 +189,16 @@ impl TaskTriggerHandler {
             })
             .collect();
 
+        let (unbound_to_crew, unbound_to_crew_total) = audit_unbound_to_crew(&self.db)?;
+
         Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&serde_json::json!({
                 "flagged_nodes": flagged,
                 "commit_rights_nodes": commit_rights_nodes,
                 "commit_rights_ensembles": commit_rights_ensembles,
                 "infra_config_overrides": infra_overrides,
+                "unbound_to_crew": unbound_to_crew,
+                "unbound_to_crew_total": unbound_to_crew_total,
             }))
             .unwrap_or_default(),
         )]))
@@ -576,4 +584,73 @@ fn validate_router_decision_config(
         }
     }
     Ok(())
+}
+
+/// Audit every non-archived graph for agent nodes, ensembles and agent hooks
+/// carrying a literal platform/model instead of a crew binding.
+fn audit_unbound_to_crew(db: &Database) -> Result<(Vec<serde_json::Value>, usize), McpError> {
+    let groups = db
+        .graph_crew(GraphCrewDbParams {
+            unbound: true,
+            ..Default::default()
+        })
+        .map_err(internal_error)?;
+    let total = groups.iter().map(|g| g.rows.len()).sum();
+    let entries = groups.into_iter().map(group_unbound_rows).collect();
+    Ok((entries, total))
+}
+
+fn group_unbound_rows(group: GraphCrewGroup) -> serde_json::Value {
+    let mut agent_nodes = Vec::new();
+    let mut ensembles: Vec<(String, String, Option<String>, Vec<serde_json::Value>)> = Vec::new();
+    let mut hooks = Vec::new();
+
+    for row in group.rows {
+        match row.kind {
+            CrewRowKind::Node => agent_nodes.push(serde_json::json!({
+                "node_id": row.node_id,
+                "name": row.name,
+                "platform": row.platform,
+                "model": row.model,
+            })),
+            CrewRowKind::EnsembleMember => {
+                let ens_id = row.ensemble_id.unwrap_or_default();
+                let member = serde_json::json!({
+                    "platform": row.platform,
+                    "model": row.model,
+                });
+                if let Some(existing) = ensembles.iter_mut().find(|(id, _, _, _)| *id == ens_id) {
+                    existing.3.push(member);
+                } else {
+                    ensembles.push((ens_id, row.name, row.ensemble_kind, vec![member]));
+                }
+            }
+            CrewRowKind::Hook => hooks.push(serde_json::json!({
+                "event": row.name,
+                "platform": row.platform,
+                "model": row.model,
+            })),
+        }
+    }
+
+    let ensembles_json: Vec<serde_json::Value> = ensembles
+        .into_iter()
+        .map(|(ensemble_id, name, kind, members)| {
+            serde_json::json!({
+                "ensemble_id": ensemble_id,
+                "name": name,
+                "kind": kind,
+                "members": members,
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "graph_id": group.id,
+        "graph_name": group.name,
+        "graph_status": group.status,
+        "agent_nodes": agent_nodes,
+        "ensembles": ensembles_json,
+        "hooks": hooks,
+    })
 }

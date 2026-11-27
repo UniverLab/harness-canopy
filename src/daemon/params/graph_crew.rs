@@ -18,4 +18,7 @@ pub struct GraphCrewParams {
     /// pair — graph, ensemble, node and hook counts plus the graph names —
     /// instead of per-graph rows.
     pub group_by: Option<String>,
+    /// When true, only the agent nodes, ensemble members and hooks that carry
+    /// a literal platform/model instead of a crew are returned.
+    pub unbound: Option<bool>,
 }

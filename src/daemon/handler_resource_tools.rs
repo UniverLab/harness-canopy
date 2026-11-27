@@ -364,6 +364,7 @@ pub(crate) static CREW: ToolSpec = ToolSpec {
                 "model",
                 "include_archived",
                 "group_by",
+                "unbound",
             ],
         },
     ],
@@ -758,7 +759,7 @@ impl TaskTriggerHandler {
         `model_set` (required: name, platform; optional: model) — create or replace a named model entry; rewrites every tracking member and bumps each touched crew once. \
         `model_list` (required: none; optional: none) — list every entry with the crews referencing it. \
         `model_delete` (required: name; optional: none) — delete an entry; refused while any crew references it. \
-        `assignments` (required: none; optional: graph_id, platform, model, include_archived, group_by) — every graph's harness/model assignments, without prompt text; group_by \"pair\" summarises per platform/model pair. `crew_pending` marks an ensemble that applies a newer crew version at its next dispatch."
+        `assignments` (required: none; optional: graph_id, platform, model, include_archived, group_by, unbound) — every graph's harness/model assignments, without prompt text; group_by \"pair\" summarises per platform/model pair; unbound: only the agent nodes, ensemble members and hooks that carry a literal platform/model instead of a crew. `crew_pending` marks an ensemble that applies a newer crew version at its next dispatch."
     )]
     pub(crate) async fn crew(
         &self,

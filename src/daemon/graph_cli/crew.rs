@@ -38,6 +38,7 @@ pub(super) fn handle_graph_crew(
         platform,
         model,
         include_archived: all,
+        unbound: false,
     };
 
     if group_by_pair {

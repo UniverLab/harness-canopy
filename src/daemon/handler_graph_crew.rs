@@ -20,6 +20,7 @@ impl TaskTriggerHandler {
             platform: params.platform.as_deref(),
             model: params.model.as_deref(),
             include_archived: params.include_archived.unwrap_or(false),
+            unbound: params.unbound.unwrap_or(false),
         };
         let json = match params.group_by.as_deref() {
             Some("pair") => serde_json::to_string_pretty(

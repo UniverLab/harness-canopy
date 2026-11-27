@@ -135,13 +135,7 @@ overrides win; absent everything, the engine default (2/60/30) applies.
 
 A retry-skipped (`infra_retry_limit: 0`) crash is recorded with `infra_retry_skipped: "limit 0"` alongside `infra_crash`/`infra_attempt`, readable via `graph` `node_run` (which already surfaces the `infra_attempt`/`infra_crash` markers when present).
 
-`graph` `get` reports the effective value and its source
-(`"node"`/`"platform"`/`"default"`) per node under `infra_config`, and
-the ensemble's own JSON carries the raw ensemble-level fields plus each
-member's `*_override` fields so member vs ensemble vs platform can be
-told apart. `graph` `audit` lists every node/member whose
-effective budget differs from its platform's own under
-`infra_config_overrides`.
+`graph` `get` reports the effective value and its source (`"node"`/`"platform"`/`"default"`) per node under `infra_config`, and the ensemble's own JSON carries the raw ensemble-level fields plus each member's `*_override` fields so member vs ensemble vs platform can be told apart. `graph` `audit` lists every node/member whose effective budget differs from its platform's own under `infra_config_overrides`, and lists every agent node, ensemble and agent hook not bound to a crew under `unbound_to_crew` (with `unbound_to_crew_total`), built from the same read path as `crew` `assignments` with `unbound: true`.
 
 ## Transient database-busy retries
 

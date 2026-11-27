@@ -447,7 +447,7 @@ impl TaskTriggerHandler {
         `get` (required: graph_id; optional: compact, node_id, ensemble) — return a graph with its ordered specs, nodes, and edges; `compact` returns a summary, `node_id` or `ensemble` returns the full record of one node or ensemble. \
         `export` (required: graph_id; optional: none) — export the graph as a portable document. \
         `validate` (required: none; optional: path, document) — validate a graph or node JSON document. \
-        `audit` (required: none; optional: none) — audit every node config for known misconfigurations. \
+        `audit` (required: none; optional: none) — audit every node config for known misconfigurations, commit-rights, infra overrides, and `unbound_to_crew`/`unbound_to_crew_total` (agent nodes, ensembles, and hooks not bound to a crew). \
         `events` (required: graph_id; optional: since_id, since_ts, spec_id, kinds, limit, include_payload) — read the graph's durable event log. \
         `node_runs` (required: graph_id; optional: spec_id, node_id, limit, offset, compact) — list the graph's node runs. \
         `node_run` (required: run_id; optional: none) — read one node run in full. \

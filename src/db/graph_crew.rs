@@ -37,6 +37,8 @@ pub struct GraphCrewDbParams<'a> {
     pub model: Option<&'a str>,
     /// Include archived graphs. Defaults to `false`.
     pub include_archived: bool,
+    /// Only include rows not bound to a crew (`crew.is_none()`).
+    pub unbound: bool,
 }
 
 impl GraphCrewDbParams<'_> {
@@ -44,11 +46,14 @@ impl GraphCrewDbParams<'_> {
     /// omits graphs that ended up with no matching row, while an unnarrowed
     /// one still shows them with an empty `rows` list.
     fn narrows(&self) -> bool {
-        self.platform.is_some() || self.model.is_some()
+        self.platform.is_some() || self.model.is_some() || self.unbound
     }
 
     /// Does `row` survive the caller's pair filters?
     fn matches(&self, row: &GraphCrewRow) -> bool {
+        if self.unbound && row.crew.is_some() {
+            return false;
+        }
         if let Some(platform) = self.platform {
             if row.platform != platform {
                 return false;
